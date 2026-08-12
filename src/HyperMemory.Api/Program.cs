@@ -1,9 +1,12 @@
 using HyperMemory.Core;
 using HyperMemory.Infrastructure;
+using System.Security.Cryptography;
+using System.Text;
 
 var builder = WebApplication.CreateBuilder(args);
 
 var storageArgument = GetArgument(args, "--storage-root") ?? Environment.GetEnvironmentVariable("HYPERMEMORY_STORAGE");
+var authTokenFile = GetArgument(args, "--auth-token-file");
 if (!string.IsNullOrWhiteSpace(storageArgument))
     builder.Configuration[$"{HyperMemoryOptions.SectionName}:StorageBasePath"] = storageArgument;
 
@@ -12,16 +15,52 @@ builder.Services.AddProblemDetails();
 builder.Services.AddHyperMemory(builder.Configuration);
 builder.Services.AddSingleton<BackgroundSummaryQueue>();
 builder.Services.AddHostedService<BackgroundSummaryWorker>();
+builder.Services.AddHostedService<IndexMaintenanceWorker>();
+builder.Services.AddHostedService<KnowledgeProjectionWorker>();
+builder.Services.AddHostedService<ScaleMaintenanceWorker>();
 
 var app = builder.Build();
+var authToken = !string.IsNullOrWhiteSpace(authTokenFile) && File.Exists(authTokenFile)
+    ? File.ReadAllText(authTokenFile).Trim()
+    : app.Configuration["HyperMemory:AuthToken"] ?? string.Empty;
 var store = app.Services.GetRequiredService<IMemoryStore>();
 await store.InitializeAsync();
 
 app.UseExceptionHandler();
+if (!string.IsNullOrWhiteSpace(authToken))
+{
+    app.Use(async (context, next) =>
+    {
+        if (context.Request.Path.StartsWithSegments("/memory"))
+        {
+            var supplied = context.Request.Headers["X-HyperMemory-Token"].ToString();
+            var expectedBytes = SHA256.HashData(Encoding.UTF8.GetBytes(authToken));
+            var suppliedBytes = SHA256.HashData(Encoding.UTF8.GetBytes(supplied));
+            if (!CryptographicOperations.FixedTimeEquals(expectedBytes, suppliedBytes))
+            {
+                context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+                return;
+            }
+        }
+        await next();
+    });
+}
+app.MapGet("/live", () => Results.Ok(new { product = "HyperMemory", status = "alive", apiVersion = "1.4.0", processId = Environment.ProcessId }));
 app.MapGet("/health", async (IMemoryStore memoryStore, CancellationToken ct) =>
 {
-    var integrity = await memoryStore.VerifyIntegrityAsync(ct);
-    return integrity.IsValid ? Results.Ok(new { product = "HyperMemory", status = "healthy", integrity }) : Results.Problem("Integrity verification failed", statusCode: 503, extensions: new Dictionary<string, object?> { ["integrity"] = integrity });
+    var status = await memoryStore.GetStatusAsync(ct);
+    return status.Status == "healthy"
+        ? Results.Ok(new
+        {
+            product = "HyperMemory",
+            status = status.Status,
+            apiVersion = "1.4.0",
+            processId = Environment.ProcessId,
+            storageRoot = status.StorageRoot,
+            counts = status,
+            integrity = new { isValid = true, atomCount = status.AtomCount, vectorCount = status.VectorCount, auditCount = status.AuditCount, problems = Array.Empty<string>() }
+        })
+        : Results.Problem("Memory counts are inconsistent", statusCode: 503, extensions: new Dictionary<string, object?> { ["status"] = status });
 });
 app.MapPost("/memory/upsert", async (MemoryWriteRequest request, IMemoryService service, BackgroundSummaryQueue summaries, CancellationToken ct) =>
 {
@@ -35,6 +74,32 @@ app.MapPost("/memory/summarize", async (SummaryRequest request, IMemoryService s
     Results.Ok(await service.SummarizeAsync(request, ct)));
 app.MapGet("/memory/integrity", async (IMemoryStore memoryStore, CancellationToken ct) =>
     Results.Ok(await memoryStore.VerifyIntegrityAsync(ct)));
+app.MapGet("/memory/knowledge/status", async (IKnowledgeProjectionStore projection, CancellationToken ct) =>
+    Results.Ok(await projection.GetKnowledgeProjectionStatusAsync(ct)));
+app.MapGet("/memory/knowledge/{versionId}", async (string versionId, IKnowledgeProjectionStore projection, CancellationToken ct) =>
+{
+    var snapshot = await projection.GetKnowledgeProjectionAsync(versionId, ct);
+    return snapshot is null ? Results.NotFound() : Results.Ok(snapshot);
+});
+app.MapPost("/memory/knowledge/rebuild", async (IKnowledgeProjectionStore projection, CancellationToken ct) =>
+{
+    await projection.RebuildKnowledgeProjectionAsync(ct);
+    return Results.Accepted(value: new { status = "rebuild_queued", sourceOfTruth = "memory_atoms" });
+});
+app.MapGet("/memory/scale", async (IScaleMaintenanceStore scale, CancellationToken ct) =>
+    Results.Ok(await scale.GetScaleStatusAsync(ct)));
+app.MapPost("/memory/maintenance", async (IScaleMaintenanceStore scale, CancellationToken ct) =>
+{
+    await scale.RunScaleMaintenanceAsync(ct);
+    return Results.Ok(new { status = "optimized", destructive = false });
+});
+app.MapGet("/memory/diagnostics", async (IOperationalDiagnosticsStore diagnostics, CancellationToken ct) =>
+    Results.Ok(await diagnostics.GetOperationalDiagnosticsAsync(ct)));
+app.MapPost("/memory/import/graph", async (ExternalGraphImportRequest request, IExternalGraphImportService importer, CancellationToken ct) =>
+{
+    var report = await importer.ImportAsync(request, ct);
+    return report.Valid ? Results.Ok(report) : Results.BadRequest(report);
+});
 await app.RunAsync();
 
 static string? GetArgument(string[] args, string name)

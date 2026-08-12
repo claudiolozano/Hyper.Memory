@@ -1,0 +1,22 @@
+[
+  {
+    "sample_id": "mini-locomo",
+    "conversation": {
+      "speaker_a": "Ana",
+      "speaker_b": "Bruno",
+      "session_1_date_time": "10:00 am on 1 January, 2025",
+      "session_1": [
+        { "speaker": "Ana", "dia_id": "D1:1", "text": "El código del faro histórico es 7319." },
+        { "speaker": "Bruno", "dia_id": "D1:2", "text": "Lo recordaré." }
+      ],
+      "session_2_date_time": "10:00 am on 2 January, 2025",
+      "session_2": [
+        { "speaker": "Ana", "dia_id": "D2:1", "text": "Hoy hablamos de jardinería y tomates." }
+      ]
+    },
+    "qa": [
+      { "question": "¿Cuál es el código del faro histórico?", "answer": "7319", "evidence": ["D1:1"], "category": 1 },
+      { "question": "¿Cuál es la mascota de Ana?", "answer": "No se indica", "evidence": [], "category": 3 }
+    ]
+  }
+]

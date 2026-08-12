@@ -1,6 +1,6 @@
 param(
     [string]$Runtime = "win-x64",
-    [string]$Version = "1.1.0",
+    [string]$Version = "1.4.0",
     [string]$CertificateThumbprint = "",
     [ValidateSet("CurrentUser", "LocalMachine")][string]$CertificateStore = "CurrentUser",
     [string]$TimestampUrl = "http://timestamp.digicert.com"
@@ -48,6 +48,7 @@ if (-not [string]::IsNullOrWhiteSpace($CertificateThumbprint)) {
 New-Item -ItemType Directory -Path (Join-Path $staging "api") -Force | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $staging "bridge") -Force | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $staging "skill") -Force | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $staging "plugin") -Force | Out-Null
 New-Item -ItemType Directory -Path $output -Force | Out-Null
 
 dotnet publish (Join-Path $repository "src\HyperMemory.Api\HyperMemory.Api.csproj") -c Release -r $Runtime --self-contained true -p:PublishSingleFile=true -p:DebugType=None -p:DebugSymbols=false -o (Join-Path $staging "api")
@@ -57,6 +58,9 @@ if ($LASTEXITCODE -ne 0) { throw "Bridge publication failed." }
 Invoke-AuthenticodeSign (Join-Path $staging "api\HyperMemory.Api.exe")
 Invoke-AuthenticodeSign (Join-Path $staging "bridge\HyperMemory.Bridge.exe")
 Copy-Item -LiteralPath (Join-Path $repository "src\HyperMemory.Bridge\hermes-skill\SKILL.md") -Destination (Join-Path $staging "skill\SKILL.md")
+Copy-Item -LiteralPath (Join-Path $repository "src\HyperMemory.Bridge\hermes-plugin\__init__.py") -Destination (Join-Path $staging "plugin\__init__.py")
+Copy-Item -LiteralPath (Join-Path $repository "src\HyperMemory.Bridge\hermes-plugin\plugin.yaml") -Destination (Join-Path $staging "plugin\plugin.yaml")
+Copy-Item -LiteralPath (Join-Path $repository "src\HyperMemory.Bridge\hermes-plugin\README.md") -Destination (Join-Path $staging "plugin\README.md")
 
 Compress-Archive -Path (Join-Path $staging "*") -DestinationPath $payload -CompressionLevel Optimal -Force
 dotnet publish (Join-Path $repository "src\HyperMemory.Installer\HyperMemory.Installer.csproj") -c Release -r $Runtime --self-contained true -p:PublishSingleFile=true -p:DebugType=None -p:DebugSymbols=false -o $output

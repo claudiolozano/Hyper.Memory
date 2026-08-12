@@ -12,8 +12,32 @@ public sealed class MemoryService(
             throw new ArgumentException("ValidFrom cannot be later than ValidTo.");
         if (request.StatedConfidence is < 0 or > 1)
             throw new ArgumentOutOfRangeException(nameof(request.StatedConfidence), "Confidence must be between 0 and 1.");
-        var vector = await embeddings.GenerateAsync(request.Content, cancellationToken);
-        return await store.AppendAsync(request, vector, cancellationToken);
+        var sanitized = Sanitize(request);
+        var vector = await embeddings.GenerateAsync(sanitized.Content, cancellationToken);
+        return await store.AppendAsync(sanitized, vector, cancellationToken);
+    }
+
+    private static MemoryWriteRequest Sanitize(MemoryWriteRequest request)
+    {
+        var (content, contentRedactions) = SensitiveDataRedactor.Redact(request.Content);
+        var metadata = request.Metadata is null
+            ? new Dictionary<string, string>()
+            : new Dictionary<string, string>(request.Metadata);
+        var metadataRedactions = 0;
+        foreach (var key in metadata.Keys.ToArray())
+        {
+            var (value, count) = SensitiveDataRedactor.Redact(metadata[key]);
+            metadata[key] = value;
+            metadataRedactions += count;
+        }
+        var total = contentRedactions + metadataRedactions;
+        var prior = metadata.TryGetValue("privacy.redactions", out var encoded) && int.TryParse(encoded, out var parsed)
+            ? Math.Max(0, parsed) : 0;
+        metadata["privacy.redactions"] = (prior + total).ToString(System.Globalization.CultureInfo.InvariantCulture);
+        metadata["privacy.classification"] = prior + total > 0 ? "restricted-redacted" :
+            metadata.GetValueOrDefault("privacy.classification") ?? "standard";
+        metadata["privacy.enforcement"] = "api-central-redaction-v1";
+        return request with { Content = content, Metadata = metadata };
     }
 
     public async Task<IReadOnlyList<MemoryHit>> QueryAsync(MemoryQuery query, CancellationToken cancellationToken = default)
@@ -26,7 +50,10 @@ public sealed class MemoryService(
             throw new ArgumentException("OccurredFrom cannot be later than OccurredTo.");
 
         var vector = await embeddings.GenerateAsync(query.Text, cancellationToken);
-        return await store.QueryAsync(query, vector, cancellationToken);
+        var effectiveQuery = vector.Provider == "local"
+            ? query with { TextWeight = 0.8, SemanticWeight = 0.2 }
+            : query;
+        return await store.QueryAsync(effectiveQuery, vector, cancellationToken);
     }
 
     public async Task<SummaryResult> SummarizeAsync(SummaryRequest request, CancellationToken cancellationToken = default)

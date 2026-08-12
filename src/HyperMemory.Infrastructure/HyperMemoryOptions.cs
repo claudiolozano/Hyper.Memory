@@ -6,8 +6,16 @@ public sealed class HyperMemoryOptions
     public string StorageBasePath { get; set; } = string.Empty;
     public string OllamaEndpoint { get; set; } = "http://127.0.0.1:11434";
     public string? OllamaModel { get; set; }
+    public bool PreferOllamaEmbeddings { get; set; }
     public bool AllowDeterministicEmbeddingFallback { get; set; } = true;
+    public bool EnableBackgroundSummaries { get; set; }
     public int BackgroundSummaryThresholdCharacters { get; set; } = 12_000;
+    public int RecentSemanticCandidateLimit { get; set; } = 2_000;
+    public bool EnableKnowledgeProjection { get; set; } = true;
+    public int KnowledgeProjectionBatchSize { get; set; } = 100;
+    public int ScaleMaintenanceIntervalMinutes { get; set; } = 360;
+    public int ExternalGraphImportMaxNodes { get; set; } = 100_000;
+    public int ExternalGraphImportMaxEdges { get; set; } = 250_000;
 }
 
 public sealed record StorageLayout(string Root, string DatabasePath)

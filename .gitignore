@@ -3,6 +3,9 @@ obj/
 .vs/
 TestResults/
 artifacts/
+/Instalador/*.exe
 src/HyperMemory.Installer/payload.zip
 *.user
 *.suo
+__pycache__/
+*.pyc

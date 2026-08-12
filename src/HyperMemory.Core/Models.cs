@@ -58,7 +58,8 @@ public sealed record MemoryQuery(
     DateTimeOffset? OccurredFrom = null,
     DateTimeOffset? OccurredTo = null,
     DateTimeOffset? ValidAt = null,
-    bool IncludeSuperseded = true);
+    bool IncludeSuperseded = true,
+    string? PreferredWorkspace = null);
 
 public sealed record MemoryCitation(
     string VersionId,
@@ -80,7 +81,12 @@ public sealed record MemoryHit(
     double TextScore,
     double SemanticScore,
     MemoryCitation? Citation = null,
-    MemoryEvidence? Evidence = null);
+    MemoryEvidence? Evidence = null,
+    KnowledgeRetrievalEvidence? Knowledge = null);
+
+public sealed record KnowledgeRetrievalEvidence(
+    double Score,
+    IReadOnlyList<string> Reasons);
 
 public sealed record MemoryWriteResult(string VersionId, string LogicalId, long Sequence, bool Created);
 
@@ -98,4 +104,96 @@ public sealed record IntegrityReport(
     long AtomCount,
     long VectorCount,
     long AuditCount,
+    IReadOnlyList<string> Problems);
+
+public sealed record MemoryStatus(
+    string Status,
+    string StorageRoot,
+    long AtomCount,
+    long VectorCount,
+    long AuditCount);
+
+public sealed record KnowledgeEntity(
+    string EntityId,
+    string EntityType,
+    string Label);
+
+public sealed record KnowledgeRelation(
+    string RelationId,
+    string FromEntityId,
+    string ToEntityId,
+    string RelationType,
+    string EvidenceClass,
+    double Confidence,
+    string SourceVersionId);
+
+public sealed record KnowledgeProjectionSnapshot(
+    string VersionId,
+    string ProjectorVersion,
+    DateTimeOffset ProjectedAt,
+    IReadOnlyList<KnowledgeEntity> Entities,
+    IReadOnlyList<KnowledgeRelation> Relations);
+
+public sealed record KnowledgeProjectionStatus(
+    string Status,
+    string ProjectorVersion,
+    long AtomCount,
+    long ProjectedCount,
+    long PendingCount,
+    long FailedCount,
+    long EntityCount,
+    long RelationCount);
+
+public sealed record MemoryScaleStatus(
+    string Status,
+    long AtomCount,
+    long DatabaseBytes,
+    long WalBytes,
+    long PageCount,
+    long FreePageCount,
+    bool FullTextCoversAllHistory,
+    int SemanticWindowSize,
+    double EstimatedSemanticCoverage,
+    long KnowledgePendingCount,
+    bool AnnEvaluationRecommended);
+
+public sealed record OperationalDiagnostics(
+    string Status,
+    long AtomCount,
+    long VectorCount,
+    long AuditCount,
+    long FullTextCount,
+    long TurnIndexCount,
+    long TurnIndexPendingCount,
+    long KnowledgeProjectedCount,
+    long KnowledgePendingCount,
+    long KnowledgeFailedCount,
+    long EntityCount,
+    long RelationCount,
+    long? LastSequence,
+    DateTimeOffset? LastOccurredAt,
+    DateTimeOffset? LastStoredAt,
+    long DatabaseBytes,
+    long WalBytes,
+    IReadOnlyList<string> Problems);
+
+public sealed record ExternalGraphImportRequest(
+    JsonElement Graph,
+    string SourceName,
+    string SourceUri,
+    string? Project = null,
+    string Format = "graphify-networkx-v1",
+    bool Commit = false,
+    string? ExpectedSha256 = null);
+
+public sealed record ExternalGraphImportReport(
+    bool Valid,
+    bool Committed,
+    string Format,
+    string SourceSha256,
+    int NodeCount,
+    int EdgeCount,
+    int CreatedCount,
+    int ExistingCount,
+    IReadOnlyList<string> Warnings,
     IReadOnlyList<string> Problems);

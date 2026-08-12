@@ -13,6 +13,9 @@ public static class ServiceCollectionExtensions
         services.AddSingleton(sp => StorageLayout.Create(sp.GetRequiredService<IOptions<HyperMemoryOptions>>().Value.StorageBasePath));
         services.AddSingleton<SqliteMemoryStore>();
         services.AddSingleton<IMemoryStore>(sp => sp.GetRequiredService<SqliteMemoryStore>());
+        services.AddSingleton<IKnowledgeProjectionStore>(sp => sp.GetRequiredService<SqliteMemoryStore>());
+        services.AddSingleton<IScaleMaintenanceStore>(sp => sp.GetRequiredService<SqliteMemoryStore>());
+        services.AddSingleton<IOperationalDiagnosticsStore>(sp => sp.GetRequiredService<SqliteMemoryStore>());
         services.AddHttpClient("ollama", (sp, client) =>
         {
             var endpoint = sp.GetRequiredService<IOptions<HyperMemoryOptions>>().Value.OllamaEndpoint;
@@ -27,6 +30,7 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<ITextSummarizer>(sp => new AdaptiveTextSummarizer(
             sp.GetRequiredService<IHttpClientFactory>().CreateClient("ollama"), sp.GetRequiredService<OllamaModelResolver>()));
         services.AddSingleton<IMemoryService, MemoryService>();
+        services.AddSingleton<IExternalGraphImportService, ExternalGraphImportService>();
         return services;
     }
 }

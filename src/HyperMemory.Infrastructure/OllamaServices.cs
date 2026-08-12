@@ -33,7 +33,9 @@ public sealed class AdaptiveEmbeddingGenerator(
 {
     public async Task<EmbeddingVector> GenerateAsync(string text, CancellationToken cancellationToken = default)
     {
-        var model = await models.ResolveAsync(cancellationToken);
+        var model = options.Value.PreferOllamaEmbeddings
+            ? await models.ResolveAsync(cancellationToken)
+            : null;
         if (model is not null)
         {
             try

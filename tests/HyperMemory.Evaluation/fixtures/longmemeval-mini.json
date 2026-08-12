@@ -1,0 +1,27 @@
+[
+  {
+    "question_id": "mini_lme_1",
+    "question_type": "single-session-user",
+    "question": "¿Cuál era el código del faro histórico?",
+    "answer": "7319",
+    "question_date": "2025/01/03 (Fri) 10:00",
+    "haystack_session_ids": ["noise_session", "answer_session"],
+    "haystack_dates": ["2025/01/01 (Wed) 09:00", "2025/01/02 (Thu) 09:00"],
+    "haystack_sessions": [
+      [{ "role": "user", "content": "Hoy hablamos de jardinería y tomates." }],
+      [{ "role": "user", "content": "El código del faro histórico es 7319.", "has_answer": true }, { "role": "assistant", "content": "Lo recordaré." }]
+    ],
+    "answer_session_ids": ["answer_session"]
+  },
+  {
+    "question_id": "mini_lme_2_abs",
+    "question_type": "single-session-user",
+    "question": "¿Cuál es la mascota del usuario?",
+    "answer": "No hay información suficiente.",
+    "question_date": "2025/01/03 (Fri) 10:00",
+    "haystack_session_ids": ["only_session"],
+    "haystack_dates": ["2025/01/01 (Wed) 09:00"],
+    "haystack_sessions": [[{ "role": "user", "content": "Hoy hablamos de jardinería y tomates." }]],
+    "answer_session_ids": []
+  }
+]

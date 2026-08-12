@@ -15,7 +15,7 @@ internal sealed class InstallerForm : Form
         MaximizeBox = false;
         StartPosition = FormStartPosition.CenterScreen;
         Controls.Add(new Label { Left = 24, Top = 20, Width = 515, Height = 48,
-            Text = "HyperMemory añade memoria histórica permanente a Hermes.\r\nLa instalación no modifica el código ni la configuración del agente." });
+            Text = "HyperMemory añade memoria histórica permanente a Hermes.\r\nUsa la extensión oficial y no modifica el código del agente." });
         Controls.Add(new Label { Left = 24, Top = 87, Width = 500, Text = "Ubicación donde se creará la carpeta Hyper_Memory:" });
         _path.Text = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "HyperMemoryData");
         _browse.Click += Browse;
@@ -39,7 +39,7 @@ internal sealed class InstallerForm : Form
             var manifest = await Task.Run(() => Program.Install(_path.Text));
             _status.Text = "Instalación completada.";
             MessageBox.Show(this,
-                $"HyperMemory está instalado y funcionando.\n\nMemoria: {manifest.StorageRoot}\n\nCierra y vuelve a abrir Hermes para activar el Skill. Puedes desinstalarlo desde Configuración > Aplicaciones.",
+                $"HyperMemory está instalado y funcionando.\n\nMemoria: {manifest.StorageRoot}\n\nCierra y vuelve a abrir Hermes para activar la memoria automática. Puedes desinstalarlo desde Configuración > Aplicaciones.",
                 "HyperMemory", MessageBoxButtons.OK, MessageBoxIcon.Information);
             Close();
         }

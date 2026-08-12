@@ -1,6 +1,9 @@
 using System.Diagnostics;
 using System.IO.Compression;
 using System.Reflection;
+using System.Security.Cryptography;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using System.Text.Json;
 using Microsoft.Win32;
 
@@ -8,7 +11,8 @@ namespace HyperMemory.Installer;
 
 internal static class Program
 {
-    private const string ProductVersion = "1.1.0";
+    private const string ProductVersion = "1.4.0";
+    private const string MemoryProviderName = "hypermemory";
     private const string RunKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
     private const string UninstallKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\HyperMemory";
     private const string RegistryValueName = "HyperMemory";
@@ -20,6 +24,7 @@ internal static class Program
         {
             var options = Options.Parse(args);
             if (options.Launch) return LaunchAsync(Required(options.Manifest, "--manifest")).GetAwaiter().GetResult();
+            if (options.Supervise) return SuperviseAsync(Required(options.Manifest, "--manifest")).GetAwaiter().GetResult();
             if (options.Uninstall) return Uninstall(options);
             if (options.Silent)
             {
@@ -47,57 +52,112 @@ internal static class Program
         var release = Path.Combine(root, "app", "releases", $"{ProductVersion}-{installId}");
         var installationDirectory = Path.Combine(root, "app", "installations");
         var manifestPath = Path.Combine(installationDirectory, installId + ".json");
-        var hermesBase = Path.GetFullPath(hermesRoot ?? Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".hermes"));
+        var configDirectory = Path.Combine(root, "app", "config");
+        var authTokenPath = Path.Combine(configDirectory, "auth-token.txt");
+        var runtimeDirectory = Path.Combine(root, "app", "runtime");
+        var supervisorPidPath = Path.Combine(runtimeDirectory, "supervisor.json");
+        var activeInstallationPath = Path.Combine(root, "app", "active-installation.json");
+        var hermesBase = ResolveHermesRoot(hermesRoot);
         var skillPath = Path.GetFullPath(Path.Combine(hermesBase, "skills", "hyper-memory"));
+        var pluginPath = Path.GetFullPath(Path.Combine(hermesBase, "plugins", MemoryProviderName));
+        var upgradeManifestPath = FindOwnedUpgradeManifest(activeInstallationPath, root, hermesBase);
+        var previousMemoryProvider = GetHermesConfigValue(hermesBase, "memory.provider");
+        if (!string.IsNullOrWhiteSpace(previousMemoryProvider) &&
+            !string.Equals(previousMemoryProvider, MemoryProviderName, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException(
+                $"Hermes ya utiliza el proveedor de memoria '{previousMemoryProvider}'. HyperMemory no lo reemplazará automáticamente.");
+        if (string.Equals(previousMemoryProvider, MemoryProviderName, StringComparison.OrdinalIgnoreCase))
+            previousMemoryProvider = null;
 
-        ValidateNewSkillTarget(skillPath);
-        Directory.CreateDirectory(release);
-        ExtractPayload(release);
-        var apiExe = RequiredFile(Path.Combine(release, "api", "HyperMemory.Api.exe"));
-        var bridgeDirectory = Path.Combine(release, "bridge");
-        RequiredFile(Path.Combine(bridgeDirectory, "HyperMemory.Bridge.exe"));
-        var skillSource = RequiredFile(Path.Combine(release, "skill", "SKILL.md"));
-
-        var installedSetup = Path.Combine(release, "HyperMemorySetup.exe");
-        File.Copy(Required(Environment.ProcessPath, "installer executable"), installedSetup, overwrite: false);
-
-        Directory.CreateDirectory(Path.Combine(skillPath, "bin"));
-        File.Copy(skillSource, Path.Combine(skillPath, "SKILL.md"), overwrite: false);
-        foreach (var file in Directory.EnumerateFiles(bridgeDirectory))
-            File.Copy(file, Path.Combine(skillPath, "bin", Path.GetFileName(file)), overwrite: false);
-        var markerPath = Path.Combine(skillPath, ".hypermemory-owned.json");
-        WriteNewJson(markerPath, new OwnershipMarker(installId, root, ProductVersion));
-
-        Directory.CreateDirectory(installationDirectory);
-        var manifest = new InstallationManifest(installId, ProductVersion, root, release, apiExe,
-            installedSetup, hermesBase, skillPath, markerPath, DateTimeOffset.UtcNow);
-        WriteNewJson(manifestPath, manifest);
-
-        var launchCommand = $"\"{installedSetup}\" --launch --manifest \"{manifestPath}\"";
-        using (var runKey = Registry.CurrentUser.CreateSubKey(RunKeyPath, writable: true))
-            runKey.SetValue(RegistryValueName, launchCommand, RegistryValueKind.String);
-        RegisterUninstaller(manifest, manifestPath);
-
-        if (startImmediately)
+        var configurationChanged = false;
+        try
         {
-            var launcher = Process.Start(new ProcessStartInfo(installedSetup,
-                $"--launch --manifest \"{manifestPath}\"") { UseShellExecute = false, CreateNoWindow = true });
-            launcher?.WaitForExit(20_000);
-            if (!WaitForHealthAsync(TimeSpan.FromSeconds(20)).GetAwaiter().GetResult())
-                throw new InvalidOperationException("La instalación terminó, pero el servicio local no pudo iniciarse. Reinicia Windows para completar el arranque.");
-        }
+            if (upgradeManifestPath is null)
+            {
+                ValidateNewSkillTarget(skillPath);
+                ValidateNewPluginTarget(pluginPath);
+            }
+            Directory.CreateDirectory(release);
+            ExtractPayload(release);
+            var apiExe = RequiredFile(Path.Combine(release, "api", "HyperMemory.Api.exe"));
+            var bridgeDirectory = Path.Combine(release, "bridge");
+            RequiredFile(Path.Combine(bridgeDirectory, "HyperMemory.Bridge.exe"));
+            var skillSource = RequiredFile(Path.Combine(release, "skill", "SKILL.md"));
+            var pluginSource = Path.Combine(release, "plugin");
+            RequiredFile(Path.Combine(pluginSource, "__init__.py"));
+            RequiredFile(Path.Combine(pluginSource, "plugin.yaml"));
 
-        Log($"Installed {installId} at {root}");
-        return manifest;
+            if (upgradeManifestPath is not null)
+            {
+                var result = Uninstall(new Options(true, false, false, true, null, null, upgradeManifestPath));
+                if (result != 0) throw new InvalidOperationException("No se pudo retirar de forma segura la instalación anterior.");
+            }
+            ValidateNewSkillTarget(skillPath);
+            ValidateNewPluginTarget(pluginPath);
+
+            var installedSetup = Path.Combine(release, "HyperMemorySetup.exe");
+            File.Copy(Required(Environment.ProcessPath, "installer executable"), installedSetup, overwrite: false);
+            Directory.CreateDirectory(configDirectory);
+            var authToken = GetOrCreateAuthToken(authTokenPath);
+
+            Directory.CreateDirectory(Path.Combine(skillPath, "bin"));
+            File.Copy(skillSource, Path.Combine(skillPath, "SKILL.md"), overwrite: false);
+            foreach (var file in Directory.EnumerateFiles(bridgeDirectory))
+                File.Copy(file, Path.Combine(skillPath, "bin", Path.GetFileName(file)), overwrite: false);
+            var markerPath = Path.Combine(skillPath, ".hypermemory-owned.json");
+            WriteNewJson(markerPath, new OwnershipMarker(installId, root, ProductVersion));
+
+            CopyNewDirectory(pluginSource, pluginPath);
+            var pluginMarkerPath = Path.Combine(pluginPath, ".hypermemory-owned.json");
+            WriteNewJson(pluginMarkerPath, new OwnershipMarker(installId, root, ProductVersion));
+            var pluginConnectionPath = Path.Combine(pluginPath, "connection.json");
+            WriteNewJson(pluginConnectionPath, new PluginConnection("http://127.0.0.1:5077", authToken, true, true, true));
+            RestrictFileToCurrentUser(pluginConnectionPath);
+            SetHermesConfigValue(hermesBase, "memory.provider", MemoryProviderName);
+            configurationChanged = true;
+
+            Directory.CreateDirectory(installationDirectory);
+            var manifest = new InstallationManifest(installId, ProductVersion, root, release, apiExe,
+                installedSetup, hermesBase, skillPath, markerPath, DateTimeOffset.UtcNow,
+                pluginPath, pluginMarkerPath, previousMemoryProvider, authTokenPath, supervisorPidPath, activeInstallationPath);
+            WriteNewJson(manifestPath, manifest);
+            WriteCurrentJson(activeInstallationPath, new ActiveInstallation(installId, manifestPath, ProductVersion));
+
+            var launchCommand = $"\"{installedSetup}\" --supervise --manifest \"{manifestPath}\"";
+            using (var runKey = Registry.CurrentUser.CreateSubKey(RunKeyPath, writable: true))
+                runKey.SetValue(RegistryValueName, launchCommand, RegistryValueKind.String);
+            RegisterUninstaller(manifest, manifestPath);
+            RetireOldManifests(installationDirectory, manifestPath);
+
+            if (startImmediately)
+            {
+                var launcher = Process.Start(new ProcessStartInfo(installedSetup,
+                    $"--supervise --manifest \"{manifestPath}\"")
+                { UseShellExecute = false, CreateNoWindow = true });
+                if (launcher is null || !WaitForHealthAsync(TimeSpan.FromSeconds(20), root, ProductVersion).GetAwaiter().GetResult())
+                    throw new InvalidOperationException("La instalación terminó, pero el servicio local no pudo iniciarse. Reinicia Windows para completar el arranque.");
+            }
+
+            Log($"Installed {installId} at {root}");
+            return manifest;
+        }
+        catch
+        {
+            RollbackFailedInstall(installId, hermesBase, skillPath, pluginPath, previousMemoryProvider,
+                configurationChanged, manifestPath, activeInstallationPath);
+            throw;
+        }
     }
 
     private static async Task<int> LaunchAsync(string manifestPath)
     {
         var manifest = ReadManifest(manifestPath);
-        if (await IsHealthyAsync()) return 0;
+        if (await IsHealthyAsync(manifest.StorageRoot, manifest.Version)) return 0;
+        if (await IsEndpointOccupiedAsync()) return 4;
+        var authArgument = string.IsNullOrWhiteSpace(manifest.AuthTokenPath) ? "" :
+            $" --auth-token-file \"{manifest.AuthTokenPath}\"";
         var process = Process.Start(new ProcessStartInfo(manifest.ApiExecutable,
-            $"--storage-root \"{manifest.StorageRoot}\"")
+            $"--storage-root \"{manifest.StorageRoot}\"{authArgument}")
         {
             WorkingDirectory = Path.GetDirectoryName(manifest.ApiExecutable)!,
             UseShellExecute = false,
@@ -105,13 +165,45 @@ internal static class Program
             WindowStyle = ProcessWindowStyle.Hidden
         });
         if (process is null) return 2;
-        return await WaitForHealthAsync(TimeSpan.FromSeconds(20)) ? 0 : 3;
+        return await WaitForHealthAsync(TimeSpan.FromSeconds(20), manifest.StorageRoot, manifest.Version, process.Id) ? 0 : 3;
+    }
+
+    private static async Task<int> SuperviseAsync(string manifestPath)
+    {
+        var manifest = ReadManifest(manifestPath);
+        if (!IsActiveInstallation(manifest, manifestPath)) return 5;
+        var mutexName = $"Local\\HyperMemorySupervisor-{Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(manifest.StorageRoot)))[..24]}";
+        using var mutex = new Mutex(initiallyOwned: true, mutexName, out var created);
+        if (!created) return 0;
+        if (!string.IsNullOrWhiteSpace(manifest.SupervisorPidPath))
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(manifest.SupervisorPidPath)!);
+            WriteCurrentJson(manifest.SupervisorPidPath, new SupervisorState(Environment.ProcessId, manifest.InstallId, Environment.ProcessPath ?? ""));
+        }
+        var failures = 0;
+        while (IsActiveInstallation(manifest, manifestPath))
+        {
+            if (await IsHealthyAsync(manifest.StorageRoot, manifest.Version))
+            {
+                failures = 0;
+                await Task.Delay(TimeSpan.FromSeconds(3));
+                continue;
+            }
+            if (await IsEndpointOccupiedAsync()) return 4;
+            var result = await LaunchAsync(manifestPath);
+            if (result == 4) return result;
+            failures = result == 0 ? 0 : failures + 1;
+            await Task.Delay(TimeSpan.FromSeconds(Math.Min(30, Math.Max(2, failures * 2))));
+        }
+        return 0;
     }
 
     private static int Uninstall(Options options)
     {
         var manifestPath = Required(options.Manifest, "--manifest");
         var manifest = ReadManifest(manifestPath);
+        if (!IsActiveInstallation(manifest, manifestPath))
+            throw new InvalidOperationException("Esta instalación ya no es la instalación activa. No se modificó Hermes.");
         if (!options.Silent)
         {
             ApplicationConfiguration.Initialize();
@@ -121,10 +213,16 @@ internal static class Program
             if (answer != DialogResult.Yes) return 0;
         }
 
+        StopOwnedSupervisor(manifest);
         StopOwnedApi(manifest.ApiExecutable);
         RemoveOwnedStartup(manifest, manifestPath);
+        RestoreOwnedMemoryProvider(manifest);
+        RemoveOwnedPlugin(manifest);
         RemoveOwnedSkill(manifest);
         Registry.CurrentUser.DeleteSubKeyTree(UninstallKeyPath, throwOnMissingSubKey: false);
+        if (!string.IsNullOrWhiteSpace(manifest.ActiveInstallationPath))
+            WriteCurrentJson(manifest.ActiveInstallationPath,
+                new ActiveInstallation(manifest.InstallId, manifestPath, manifest.Version, "uninstalled"));
         var receipt = Path.Combine(manifest.StorageRoot, $"UNINSTALLED-{DateTime.UtcNow:yyyyMMddTHHmmssfffZ}.txt");
         using (var writer = new StreamWriter(new FileStream(receipt, FileMode.CreateNew, FileAccess.Write, FileShare.Read)))
         {
@@ -141,29 +239,133 @@ internal static class Program
 
     private static void RemoveOwnedStartup(InstallationManifest manifest, string manifestPath)
     {
-        var expected = $"\"{manifest.InstallerExecutable}\" --launch --manifest \"{manifestPath}\"";
+        var expected = $"\"{manifest.InstallerExecutable}\" --supervise --manifest \"{manifestPath}\"";
         using var runKey = Registry.CurrentUser.OpenSubKey(RunKeyPath, writable: true);
         var actual = runKey?.GetValue(RegistryValueName) as string;
         if (string.Equals(actual, expected, StringComparison.Ordinal)) runKey?.DeleteValue(RegistryValueName, false);
+    }
+
+    private static void StopOwnedSupervisor(InstallationManifest manifest)
+    {
+        if (string.IsNullOrWhiteSpace(manifest.SupervisorPidPath) || !File.Exists(manifest.SupervisorPidPath)) return;
+        var expectedPidPath = Path.GetFullPath(Path.Combine(manifest.StorageRoot, "app", "runtime", "supervisor.json"));
+        if (!string.Equals(Path.GetFullPath(manifest.SupervisorPidPath), expectedPidPath, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("La ruta de control del supervisor no es segura.");
+        var state = JsonSerializer.Deserialize<SupervisorState>(File.ReadAllText(manifest.SupervisorPidPath));
+        if (state is null || state.InstallId != manifest.InstallId || state.ProcessId == Environment.ProcessId) return;
+        try
+        {
+            using var process = Process.GetProcessById(state.ProcessId);
+            var actual = process.MainModule?.FileName;
+            if (!string.Equals(actual is null ? null : Path.GetFullPath(actual), Path.GetFullPath(manifest.InstallerExecutable), StringComparison.OrdinalIgnoreCase))
+                return;
+            process.Kill(entireProcessTree: false);
+            process.WaitForExit(10_000);
+        }
+        catch (ArgumentException) { }
+    }
+
+    private static void RollbackFailedInstall(string installId, string hermesRoot, string skillPath, string pluginPath,
+        string? previousMemoryProvider, bool configurationChanged, string manifestPath, string activeInstallationPath)
+    {
+        try
+        {
+            if (configurationChanged && string.Equals(GetHermesConfigValue(hermesRoot, "memory.provider"), MemoryProviderName, StringComparison.OrdinalIgnoreCase))
+            {
+                if (string.IsNullOrWhiteSpace(previousMemoryProvider)) UnsetHermesConfigValue(hermesRoot, "memory.provider");
+                else SetHermesConfigValue(hermesRoot, "memory.provider", previousMemoryProvider);
+            }
+        }
+        catch (Exception error) { Log($"Rollback could not restore Hermes configuration: {error}"); }
+
+        TryRemoveCreatedDirectory(pluginPath, installId);
+        TryRemoveCreatedDirectory(skillPath, installId);
+        try
+        {
+            using var runKey = Registry.CurrentUser.OpenSubKey(RunKeyPath, writable: true);
+            if (runKey?.GetValue(RegistryValueName) is string value && value.Contains(installId, StringComparison.Ordinal))
+                runKey.DeleteValue(RegistryValueName, false);
+            string? uninstallCommand;
+            using (var uninstall = Registry.CurrentUser.OpenSubKey(UninstallKeyPath))
+                uninstallCommand = uninstall?.GetValue("UninstallString") as string;
+            if (uninstallCommand is not null && uninstallCommand.Contains(installId, StringComparison.Ordinal))
+                Registry.CurrentUser.DeleteSubKeyTree(UninstallKeyPath, false);
+        }
+        catch (Exception error) { Log($"Rollback could not clean registry: {error}"); }
+        try
+        {
+            if (File.Exists(activeInstallationPath))
+            {
+                var active = JsonSerializer.Deserialize<ActiveInstallation>(File.ReadAllText(activeInstallationPath));
+                if (active?.InstallId == installId)
+                    WriteCurrentJson(activeInstallationPath, active with { Status = "failed" });
+            }
+            if (File.Exists(manifestPath)) File.Move(manifestPath, manifestPath + ".failed", overwrite: false);
+        }
+        catch (Exception error) { Log($"Rollback could not retire failed manifest: {error}"); }
+    }
+
+    private static void TryRemoveCreatedDirectory(string path, string installId)
+    {
+        try
+        {
+            if (!Directory.Exists(path)) return;
+            var info = new DirectoryInfo(path);
+            if ((info.Attributes & FileAttributes.ReparsePoint) != 0) return;
+            var markerPath = Path.Combine(path, ".hypermemory-owned.json");
+            if (File.Exists(markerPath))
+            {
+                var marker = JsonSerializer.Deserialize<OwnershipMarker>(File.ReadAllText(markerPath));
+                if (marker?.InstallId != installId) return;
+            }
+            foreach (var entry in info.EnumerateFileSystemInfos("*", SearchOption.AllDirectories))
+                if ((entry.Attributes & FileAttributes.ReparsePoint) != 0) return;
+            Directory.Delete(path, recursive: true);
+        }
+        catch (Exception error) { Log($"Rollback could not remove {path}: {error}"); }
     }
 
     private static void RemoveOwnedSkill(InstallationManifest manifest)
     {
         var expected = Path.GetFullPath(Path.Combine(manifest.HermesRoot, "skills", "hyper-memory"));
         var actual = Path.GetFullPath(manifest.SkillPath);
+        RemoveOwnedDirectory(actual, expected, manifest.MarkerPath, manifest.InstallId, "Skill");
+    }
+
+    private static void RemoveOwnedPlugin(InstallationManifest manifest)
+    {
+        if (string.IsNullOrWhiteSpace(manifest.PluginPath) || string.IsNullOrWhiteSpace(manifest.PluginMarkerPath)) return;
+        var expected = Path.GetFullPath(Path.Combine(manifest.HermesRoot, "plugins", MemoryProviderName));
+        var actual = Path.GetFullPath(manifest.PluginPath);
+        RemoveOwnedDirectory(actual, expected, manifest.PluginMarkerPath, manifest.InstallId, "plugin");
+    }
+
+    private static void RemoveOwnedDirectory(string actual, string expected, string markerPath, string installId, string label)
+    {
         if (!string.Equals(actual, expected, StringComparison.OrdinalIgnoreCase))
-            throw new InvalidOperationException("La ruta del Skill no coincide con la ubicación segura esperada. No se eliminó nada de Hermes.");
+            throw new InvalidOperationException($"La ruta del {label} no coincide con la ubicación segura esperada. No se eliminó nada de Hermes.");
         if (!Directory.Exists(actual)) return;
         var rootInfo = new DirectoryInfo(actual);
         if ((rootInfo.Attributes & FileAttributes.ReparsePoint) != 0)
-            throw new InvalidOperationException("El Skill es un enlace o unión. No se eliminó nada.");
-        var marker = JsonSerializer.Deserialize<OwnershipMarker>(File.ReadAllText(manifest.MarkerPath));
-        if (marker?.InstallId != manifest.InstallId)
-            throw new InvalidOperationException("No se pudo verificar que el Skill pertenezca a esta instalación.");
+            throw new InvalidOperationException($"El {label} es un enlace o unión. No se eliminó nada.");
+        var marker = JsonSerializer.Deserialize<OwnershipMarker>(File.ReadAllText(markerPath));
+        if (marker?.InstallId != installId)
+            throw new InvalidOperationException($"No se pudo verificar que el {label} pertenezca a esta instalación.");
         foreach (var entry in rootInfo.EnumerateFileSystemInfos("*", SearchOption.AllDirectories))
             if ((entry.Attributes & FileAttributes.ReparsePoint) != 0)
-                throw new InvalidOperationException($"Se detectó un enlace dentro del Skill: {entry.FullName}. No se eliminó nada.");
+                throw new InvalidOperationException($"Se detectó un enlace dentro del {label}: {entry.FullName}. No se eliminó nada.");
         Directory.Delete(actual, recursive: true);
+    }
+
+    private static void RestoreOwnedMemoryProvider(InstallationManifest manifest)
+    {
+        if (string.IsNullOrWhiteSpace(manifest.PluginPath)) return;
+        var current = GetHermesConfigValue(manifest.HermesRoot, "memory.provider");
+        if (!string.Equals(current, MemoryProviderName, StringComparison.OrdinalIgnoreCase)) return;
+        if (string.IsNullOrWhiteSpace(manifest.PreviousMemoryProvider))
+            UnsetHermesConfigValue(manifest.HermesRoot, "memory.provider");
+        else
+            SetHermesConfigValue(manifest.HermesRoot, "memory.provider", manifest.PreviousMemoryProvider);
     }
 
     private static void StopOwnedApi(string expectedExecutable)
@@ -188,7 +390,7 @@ internal static class Program
     {
         using var key = Registry.CurrentUser.CreateSubKey(UninstallKeyPath, writable: true);
         key.SetValue("DisplayName", "HyperMemory para Hermes", RegistryValueKind.String);
-        key.SetValue("DisplayVersion", ProductVersion, RegistryValueKind.String);
+        key.SetValue("DisplayVersion", manifest.Version, RegistryValueKind.String);
         key.SetValue("Publisher", "HyperMemory", RegistryValueKind.String);
         key.SetValue("InstallLocation", manifest.StorageRoot, RegistryValueKind.String);
         key.SetValue("UninstallString", $"\"{manifest.InstallerExecutable}\" --uninstall --manifest \"{manifestPath}\"", RegistryValueKind.String);
@@ -243,22 +445,202 @@ internal static class Program
             throw new InvalidOperationException("La carpeta de Skills de Hermes es un enlace o unión y no puede modificarse de forma segura.");
     }
 
+    private static void ValidateNewPluginTarget(string pluginPath)
+    {
+        if (Directory.Exists(pluginPath) || File.Exists(pluginPath))
+            throw new InvalidOperationException("Ya existe un plugin llamado hypermemory. Para proteger Hermes no será sobrescrito; desinstala primero la instalación anterior.");
+        var pluginsRoot = Path.GetDirectoryName(pluginPath)!;
+        Directory.CreateDirectory(pluginsRoot);
+        if ((new DirectoryInfo(pluginsRoot).Attributes & FileAttributes.ReparsePoint) != 0)
+            throw new InvalidOperationException("La carpeta de plugins de Hermes es un enlace o unión y no puede modificarse de forma segura.");
+    }
+
+    private static void CopyNewDirectory(string source, string destination)
+    {
+        if (Directory.Exists(destination) || File.Exists(destination))
+            throw new IOException($"El destino ya existe: {destination}");
+        Directory.CreateDirectory(destination);
+        foreach (var directory in Directory.EnumerateDirectories(source, "*", SearchOption.AllDirectories))
+            Directory.CreateDirectory(Path.Combine(destination, Path.GetRelativePath(source, directory)));
+        foreach (var file in Directory.EnumerateFiles(source, "*", SearchOption.AllDirectories))
+            File.Copy(file, Path.Combine(destination, Path.GetRelativePath(source, file)), overwrite: false);
+    }
+
+    private static string? GetHermesConfigValue(string hermesRoot, string key) =>
+        RunHermesConfig(hermesRoot, "get", key, null).Trim() is { Length: > 0 } value ? value : null;
+
+    private static void SetHermesConfigValue(string hermesRoot, string key, string value) =>
+        RunHermesConfig(hermesRoot, "set", key, value);
+
+    private static void UnsetHermesConfigValue(string hermesRoot, string key) =>
+        RunHermesConfig(hermesRoot, "unset", key, null);
+
+    private static string RunHermesConfig(string hermesRoot, string action, string key, string? value)
+    {
+        var agentRoot = Path.Combine(hermesRoot, "hermes-agent");
+        var python = RequiredFile(Path.Combine(agentRoot, "venv", "Scripts", "python.exe"));
+        var info = new ProcessStartInfo(python)
+        {
+            WorkingDirectory = agentRoot,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
+        };
+        info.Environment["HERMES_HOME"] = hermesRoot;
+        info.ArgumentList.Add("-m");
+        info.ArgumentList.Add("hermes_cli.main");
+        info.ArgumentList.Add("config");
+        info.ArgumentList.Add(action);
+        info.ArgumentList.Add(key);
+        if (value is not null) info.ArgumentList.Add(value);
+        using var process = Process.Start(info) ?? throw new InvalidOperationException("No se pudo ejecutar la configuración oficial de Hermes.");
+        var output = process.StandardOutput.ReadToEnd();
+        var error = process.StandardError.ReadToEnd();
+        if (!process.WaitForExit(15_000))
+        {
+            process.Kill(entireProcessTree: true);
+            throw new TimeoutException("Hermes tardó demasiado en actualizar su configuración.");
+        }
+        if (process.ExitCode != 0)
+            throw new InvalidOperationException($"Hermes no pudo actualizar su configuración: {error.Trim()}");
+        return output;
+    }
+
+    private static string ResolveHermesRoot(string? requestedRoot)
+    {
+        if (!string.IsNullOrWhiteSpace(requestedRoot))
+            return Path.GetFullPath(requestedRoot);
+
+        var environmentRoot = Environment.GetEnvironmentVariable("HERMES_HOME");
+        if (!string.IsNullOrWhiteSpace(environmentRoot))
+            return Path.GetFullPath(environmentRoot);
+
+        if (OperatingSystem.IsWindows())
+        {
+            var desktopRoot = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "hermes");
+            if (Directory.Exists(desktopRoot) &&
+                (File.Exists(Path.Combine(desktopRoot, "config.yaml")) ||
+                 Directory.Exists(Path.Combine(desktopRoot, "hermes-agent")) ||
+                 Directory.Exists(Path.Combine(desktopRoot, "skills"))))
+                return Path.GetFullPath(desktopRoot);
+        }
+
+        return Path.GetFullPath(Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".hermes"));
+    }
+
+    private static string? FindOwnedUpgradeManifest(string activeInstallationPath, string storageRoot, string hermesRoot)
+    {
+        if (!File.Exists(activeInstallationPath)) return null;
+        var active = JsonSerializer.Deserialize<ActiveInstallation>(File.ReadAllText(activeInstallationPath))
+            ?? throw new InvalidOperationException("El registro de la instalación activa no es válido.");
+        if (!string.Equals(active.Status, "active", StringComparison.OrdinalIgnoreCase)) return null;
+
+        var manifestPath = Path.GetFullPath(active.ManifestPath);
+        var expectedDirectory = Path.GetFullPath(Path.Combine(storageRoot, "app", "installations"));
+        if (!string.Equals(Path.GetDirectoryName(manifestPath), expectedDirectory, StringComparison.OrdinalIgnoreCase) ||
+            !File.Exists(manifestPath))
+            throw new InvalidOperationException("No se pudo verificar de forma segura la instalación anterior.");
+
+        var manifest = ReadManifest(manifestPath);
+        if (manifest.InstallId != active.InstallId ||
+            !string.Equals(Path.GetFullPath(manifest.StorageRoot), Path.GetFullPath(storageRoot), StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(Path.GetFullPath(manifest.HermesRoot), Path.GetFullPath(hermesRoot), StringComparison.OrdinalIgnoreCase) ||
+            !IsActiveInstallation(manifest, manifestPath))
+            throw new InvalidOperationException("La instalación anterior no coincide con Hermes o con la memoria seleccionada.");
+
+        if (!Version.TryParse(manifest.Version, out var installedVersion) || !Version.TryParse(ProductVersion, out var incomingVersion))
+            throw new InvalidOperationException("No se pudo comparar la versión instalada.");
+        if (installedVersion >= incomingVersion)
+            throw new InvalidOperationException($"HyperMemory {manifest.Version} ya está instalado. No se realizó ningún cambio.");
+        return manifestPath;
+    }
+
     private static InstallationManifest ReadManifest(string path) =>
         JsonSerializer.Deserialize<InstallationManifest>(File.ReadAllText(Path.GetFullPath(path)))
         ?? throw new InvalidOperationException("El manifiesto de instalación no es válido.");
 
-    private static async Task<bool> WaitForHealthAsync(TimeSpan timeout)
+    private static string GetOrCreateAuthToken(string path)
+    {
+        if (File.Exists(path))
+        {
+            var existing = File.ReadAllText(path).Trim();
+            if (existing.Length < 32) throw new InvalidOperationException("El token local de HyperMemory no es válido.");
+            RestrictFileToCurrentUser(path);
+            return existing;
+        }
+        var token = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+        using var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.Read);
+        using var writer = new StreamWriter(stream, new System.Text.UTF8Encoding(false), leaveOpen: true);
+        writer.Write(token);
+        writer.Flush();
+        stream.Flush(true);
+        RestrictFileToCurrentUser(path);
+        return token;
+    }
+
+    private static void RestrictFileToCurrentUser(string path)
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var identity = WindowsIdentity.GetCurrent().User ?? throw new InvalidOperationException("No se pudo identificar al usuario actual.");
+        var security = new FileSecurity();
+        security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+        security.AddAccessRule(new FileSystemAccessRule(identity, FileSystemRights.FullControl, AccessControlType.Allow));
+        new FileInfo(path).SetAccessControl(security);
+    }
+
+    private static void WriteCurrentJson<T>(string path, T value)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        var temporary = path + $".{Environment.ProcessId}.{Guid.NewGuid():N}.tmp";
+        try
+        {
+            using (var stream = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            {
+                JsonSerializer.Serialize(stream, value, new JsonSerializerOptions { WriteIndented = true });
+                stream.Flush(true);
+            }
+            File.Move(temporary, path, overwrite: true);
+        }
+        finally { if (File.Exists(temporary)) File.Delete(temporary); }
+    }
+
+    private static bool IsActiveInstallation(InstallationManifest manifest, string manifestPath)
+    {
+        if (string.IsNullOrWhiteSpace(manifest.ActiveInstallationPath)) return true;
+        try
+        {
+            var active = JsonSerializer.Deserialize<ActiveInstallation>(File.ReadAllText(manifest.ActiveInstallationPath));
+            return active?.Status == "active" && active.InstallId == manifest.InstallId &&
+                string.Equals(Path.GetFullPath(active.ManifestPath), Path.GetFullPath(manifestPath), StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception error) when (error is IOException or JsonException or UnauthorizedAccessException) { return false; }
+    }
+
+    private static void RetireOldManifests(string installationDirectory, string currentManifest)
+    {
+        foreach (var path in Directory.EnumerateFiles(installationDirectory, "*.json", SearchOption.TopDirectoryOnly))
+        {
+            if (string.Equals(Path.GetFullPath(path), Path.GetFullPath(currentManifest), StringComparison.OrdinalIgnoreCase)) continue;
+            var retired = path + $".retired-{DateTime.UtcNow:yyyyMMddTHHmmssfffZ}";
+            File.Move(path, retired, overwrite: false);
+        }
+    }
+
+    private static async Task<bool> WaitForHealthAsync(TimeSpan timeout, string expectedStorageRoot, string expectedVersion, int? expectedProcessId = null)
     {
         var deadline = DateTime.UtcNow + timeout;
         do
         {
-            if (await IsHealthyAsync()) return true;
+            if (await IsHealthyAsync(expectedStorageRoot, expectedVersion, expectedProcessId)) return true;
             await Task.Delay(250);
         } while (DateTime.UtcNow < deadline);
         return false;
     }
 
-    private static async Task<bool> IsHealthyAsync()
+    private static async Task<bool> IsHealthyAsync(string expectedStorageRoot, string expectedVersion, int? expectedProcessId = null)
     {
         try
         {
@@ -266,8 +648,24 @@ internal static class Program
             using var response = await client.GetAsync("http://127.0.0.1:5077/health");
             if (!response.IsSuccessStatusCode) return false;
             using var json = JsonDocument.Parse(await response.Content.ReadAsStreamAsync());
-            return json.RootElement.TryGetProperty("product", out var product) && product.GetString() == "HyperMemory" &&
-                   json.RootElement.TryGetProperty("status", out var status) && status.GetString() == "healthy";
+            var root = json.RootElement;
+            return root.TryGetProperty("product", out var product) && product.GetString() == "HyperMemory" &&
+                   root.TryGetProperty("status", out var status) && status.GetString() == "healthy" &&
+                   root.TryGetProperty("apiVersion", out var version) && version.GetString() == expectedVersion &&
+                   root.TryGetProperty("storageRoot", out var storage) &&
+                   string.Equals(Path.GetFullPath(storage.GetString() ?? ""), Path.GetFullPath(expectedStorageRoot), StringComparison.OrdinalIgnoreCase) &&
+                   (!expectedProcessId.HasValue || root.TryGetProperty("processId", out var pid) && pid.GetInt32() == expectedProcessId.Value);
+        }
+        catch { return false; }
+    }
+
+    private static async Task<bool> IsEndpointOccupiedAsync()
+    {
+        try
+        {
+            using var client = new HttpClient { Timeout = TimeSpan.FromMilliseconds(750) };
+            using var response = await client.GetAsync("http://127.0.0.1:5077/live");
+            return true;
         }
         catch { return false; }
     }
@@ -288,7 +686,7 @@ internal static class Program
         catch { }
     }
 
-    private sealed record Options(bool Silent, bool Launch, bool Uninstall, string? StorageRoot, string? HermesRoot, string? Manifest)
+    private sealed record Options(bool Silent, bool Launch, bool Supervise, bool Uninstall, string? StorageRoot, string? HermesRoot, string? Manifest)
     {
         public static Options Parse(string[] args)
         {
@@ -299,12 +697,19 @@ internal static class Program
             }
             return new Options(args.Any(x => x.Equals("--silent", StringComparison.OrdinalIgnoreCase) || x.Equals("/S", StringComparison.OrdinalIgnoreCase)),
                 args.Any(x => x.Equals("--launch", StringComparison.OrdinalIgnoreCase)),
+                args.Any(x => x.Equals("--supervise", StringComparison.OrdinalIgnoreCase)),
                 args.Any(x => x.Equals("--uninstall", StringComparison.OrdinalIgnoreCase)),
                 Value("--storage-root"), Value("--hermes-root"), Value("--manifest"));
         }
     }
 
     internal sealed record InstallationManifest(string InstallId, string Version, string StorageRoot, string ReleaseDirectory,
-        string ApiExecutable, string InstallerExecutable, string HermesRoot, string SkillPath, string MarkerPath, DateTimeOffset InstalledAt);
+        string ApiExecutable, string InstallerExecutable, string HermesRoot, string SkillPath, string MarkerPath, DateTimeOffset InstalledAt,
+        string? PluginPath = null, string? PluginMarkerPath = null, string? PreviousMemoryProvider = null,
+        string? AuthTokenPath = null, string? SupervisorPidPath = null, string? ActiveInstallationPath = null);
     internal sealed record OwnershipMarker(string InstallId, string StorageRoot, string Version);
+    internal sealed record PluginConnection(string Endpoint, string Token, bool RedactSecrets,
+        bool CaptureEnabled, bool UserOptOutEnabled);
+    internal sealed record ActiveInstallation(string InstallId, string ManifestPath, string Version, string Status = "active");
+    internal sealed record SupervisorState(int ProcessId, string InstallId, string Executable);
 }

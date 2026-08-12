@@ -11,6 +11,8 @@ var endpoint = GetOption(args, "--endpoint")
     ?? Environment.GetEnvironmentVariable("HYPERMEMORY_API")
     ?? "http://127.0.0.1:5077";
 using var client = new HttpClient { BaseAddress = new Uri(endpoint.TrimEnd('/') + "/"), Timeout = TimeSpan.FromMinutes(5) };
+var token = GetOption(args, "--token") ?? Environment.GetEnvironmentVariable("HYPERMEMORY_TOKEN");
+if (!string.IsNullOrWhiteSpace(token)) client.DefaultRequestHeaders.Add("X-HyperMemory-Token", token);
 var route = args[0].ToLowerInvariant() switch
 {
     "health" => "health",

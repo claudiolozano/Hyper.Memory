@@ -19,6 +19,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HyperMemory.Tests", "tests\
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HyperMemory.Installer", "src\HyperMemory.Installer\HyperMemory.Installer.csproj", "{481E91A7-612F-49C0-91D9-D8D789A460E9}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "HyperMemory.Evaluation", "tests\HyperMemory.Evaluation\HyperMemory.Evaluation.csproj", "{662F36D6-5229-49BC-9307-79C4131824F8}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -101,6 +103,18 @@ Global
 		{481E91A7-612F-49C0-91D9-D8D789A460E9}.Release|x64.Build.0 = Release|Any CPU
 		{481E91A7-612F-49C0-91D9-D8D789A460E9}.Release|x86.ActiveCfg = Release|Any CPU
 		{481E91A7-612F-49C0-91D9-D8D789A460E9}.Release|x86.Build.0 = Release|Any CPU
+		{662F36D6-5229-49BC-9307-79C4131824F8}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{662F36D6-5229-49BC-9307-79C4131824F8}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{662F36D6-5229-49BC-9307-79C4131824F8}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{662F36D6-5229-49BC-9307-79C4131824F8}.Debug|x64.Build.0 = Debug|Any CPU
+		{662F36D6-5229-49BC-9307-79C4131824F8}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{662F36D6-5229-49BC-9307-79C4131824F8}.Debug|x86.Build.0 = Debug|Any CPU
+		{662F36D6-5229-49BC-9307-79C4131824F8}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{662F36D6-5229-49BC-9307-79C4131824F8}.Release|Any CPU.Build.0 = Release|Any CPU
+		{662F36D6-5229-49BC-9307-79C4131824F8}.Release|x64.ActiveCfg = Release|Any CPU
+		{662F36D6-5229-49BC-9307-79C4131824F8}.Release|x64.Build.0 = Release|Any CPU
+		{662F36D6-5229-49BC-9307-79C4131824F8}.Release|x86.ActiveCfg = Release|Any CPU
+		{662F36D6-5229-49BC-9307-79C4131824F8}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -112,5 +126,6 @@ Global
 		{54387E5A-A99A-40F0-B54E-43210FDF8BAC} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 		{16C146AE-EFE2-45E1-ABC4-147610ADE65A} = {0AB3BF05-4346-4AA6-1389-037BE0695223}
 		{481E91A7-612F-49C0-91D9-D8D789A460E9} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
+		{662F36D6-5229-49BC-9307-79C4131824F8} = {0AB3BF05-4346-4AA6-1389-037BE0695223}
 	EndGlobalSection
 EndGlobal

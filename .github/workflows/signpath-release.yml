@@ -6,7 +6,7 @@ on:
       version:
         description: Release version without a leading v
         required: true
-        default: 1.1.0
+        default: 1.4.0
 
 permissions:
   contents: read
@@ -25,9 +25,27 @@ jobs:
         with:
           dotnet-version: 10.0.x
 
+      - name: Install Python 3.11
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
       - name: Test
         shell: pwsh
-        run: dotnet test HyperMemory.sln -c Release
+        run: |
+          if ('${{ inputs.version }}' -ne '1.4.0') { throw 'Workflow version must match source version 1.4.0.' }
+          dotnet test HyperMemory.sln -c Release
+          python -m unittest discover -s tests -p '*_test.py' -v
+
+      - name: Enforce retrieval quality thresholds
+        shell: pwsh
+        run: dotnet run --project tests/HyperMemory.Evaluation -c Release --no-restore
+
+      - name: Validate external benchmark adapters
+        shell: pwsh
+        run: |
+          ./scripts/Run-Evaluation.ps1 -Dataset tests/HyperMemory.Evaluation/fixtures/locomo-mini.json -Format locomo -Output artifacts/evaluation/locomo-adapter.json
+          ./scripts/Run-Evaluation.ps1 -Dataset tests/HyperMemory.Evaluation/fixtures/longmemeval-mini.json -Format longmemeval -Output artifacts/evaluation/longmemeval-adapter.json
 
       - name: Build first-party runtime executables
         shell: pwsh

@@ -1,8 +1,23 @@
 param(
     [Parameter(Mandatory = $true)][string]$PublishedBridgeDirectory,
-    [string]$HermesSkillsRoot = (Join-Path $HOME ".hermes\skills")
+    [string]$HermesSkillsRoot = ""
 )
 $ErrorActionPreference = "Stop"
+$hermesRoot = $env:HERMES_HOME
+if ([string]::IsNullOrWhiteSpace($HermesSkillsRoot)) {
+    if (-not [string]::IsNullOrWhiteSpace($hermesRoot)) {
+        $HermesSkillsRoot = Join-Path $hermesRoot "skills"
+    } elseif ($IsWindows) {
+        $desktopRoot = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) "hermes"
+        if (Test-Path -LiteralPath $desktopRoot -PathType Container) {
+            $HermesSkillsRoot = Join-Path $desktopRoot "skills"
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($HermesSkillsRoot)) {
+        $userRoot = [Environment]::GetFolderPath('UserProfile')
+        $HermesSkillsRoot = Join-Path (Join-Path $userRoot ".hermes") "skills"
+    }
+}
 $source = (Resolve-Path -LiteralPath $PublishedBridgeDirectory).Path
 $target = Join-Path $HermesSkillsRoot "hyper-memory"
 if (Test-Path -LiteralPath $target) {
