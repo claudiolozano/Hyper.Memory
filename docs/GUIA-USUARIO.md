@@ -22,9 +22,15 @@ Si el servicio se cierra inesperadamente, su supervisor local lo vuelve a inicia
 1. Abre **Configuración de Windows**.
 2. Entra en **Aplicaciones > Aplicaciones instaladas**.
 3. Busca **HyperMemory para Hermes** y pulsa **Desinstalar**.
-4. Cierra y vuelve a abrir Hermes.
+4. Elige **Sí** para conservar los recuerdos (recomendado) o **No** para borrarlos permanentemente.
+5. Si elegiste borrar, confirma por segunda vez.
+6. Cierra y vuelve a abrir Hermes.
 
-La desinstalación retira el proveedor automático y el Skill instalados por HyperMemory, restaura el proveedor de memoria anterior si existía y detiene el servicio. No altera Hermes ni sus demás Skills. Por seguridad, conserva la memoria histórica dentro de `Hyper_Memory` como respaldo.
+La desinstalación retira el proveedor automático y el Skill instalados por HyperMemory, restaura el proveedor de memoria anterior si existía y detiene el servicio. No altera Hermes ni sus demás Skills. La opción recomendada conserva la memoria dentro de `Hyper_Memory`; el borrado permanente sólo ocurre tras elegirlo y confirmarlo expresamente.
+
+## Actualizar
+
+Abre el instalador nuevo y elige la misma ubicación. HyperMemory crea y verifica un respaldo antes de cambiar Hermes. Si la versión nueva no puede instalarse o arrancar, restaura automáticamente la integración y la base de datos anteriores.
 
 ## Comprobación rápida
 

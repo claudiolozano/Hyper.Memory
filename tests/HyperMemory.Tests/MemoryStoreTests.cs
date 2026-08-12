@@ -173,6 +173,21 @@ public sealed class MemoryStoreTests
     }
 
     [Fact]
+    public async Task Structured_identifier_recalls_an_old_record_beyond_the_text_candidate_limit()
+    {
+        await using var store = new SqliteMemoryStore(NewLayout());
+        await store.InitializeAsync();
+        for (var index = 0; index < 100; index++)
+            await store.AppendAsync(new MemoryWriteRequest(
+                $"User request:\nrecord anchor-{index:D8}\n\nHermes response:\nStored record {index}.",
+                EventId: $"anchor-event-{index:D8}", Project: "scale"), Vector(1, 0));
+
+        var hits = await store.QueryAsync(new MemoryQuery("anchor-00000000", 5, "scale"), Vector(1, 0));
+        Assert.NotEmpty(hits);
+        Assert.Equal("anchor-event-00000000", hits[0].Atom.VersionId);
+    }
+
+    [Fact]
     public async Task Lightweight_status_reports_counts_without_full_archive_audit()
     {
         await using var store = new SqliteMemoryStore(NewLayout());
@@ -229,7 +244,8 @@ public sealed class MemoryStoreTests
         Assert.Contains(projection.Entities, entity => entity.EntityType == "session" && entity.Label == "session-42");
         var produced = Assert.Single(projection.Relations, relation => relation.RelationType == "PRODUCED_ARTIFACT");
         Assert.Equal("INFERRED", produced.EvidenceClass);
-        Assert.DoesNotContain(projection.Relations, relation => relation.EvidenceClass == "VERIFIED");
+        Assert.DoesNotContain(projection.Relations, relation =>
+            relation.RelationType == "PRODUCED_ARTIFACT" && relation.EvidenceClass == "VERIFIED");
     }
 
     [Fact]
@@ -281,6 +297,39 @@ public sealed class MemoryStoreTests
     }
 
     [Fact]
+    public async Task Knowledge_projection_records_storage_people_dates_and_corrections_without_inventing_verification()
+    {
+        await using var store = new SqliteMemoryStore(NewLayout());
+        await store.InitializeAsync();
+        await store.AppendAsync(new MemoryWriteRequest(
+            "User request:\nPersona: Ana Torres revisará el cambio el 12/08/2026.\n\nHermes response:\n" +
+            "Responsable: Luis Pérez. La corrección queda documentada para 2026-08-13.",
+            LogicalId: "release-decision", EventId: "decision-v1", Project: "hermes",
+            OccurredAt: new DateTimeOffset(2026, 8, 12, 10, 0, 0, TimeSpan.Zero),
+            ClaimKey: "release.owner"), Vector(1, 0));
+        await store.AppendAsync(new MemoryWriteRequest(
+            "User request:\ncorrige la decisión\n\nHermes response:\nResponsable: Marta Ruiz.",
+            LogicalId: "release-decision", EventId: "decision-v2", Project: "hermes",
+            OccurredAt: new DateTimeOffset(2026, 8, 13, 10, 0, 0, TimeSpan.Zero),
+            SupersedesVersionId: "decision-v1", ClaimKey: "release.owner"), Vector(1, 0));
+
+        Assert.Equal(2, await store.ProjectPendingKnowledgeAsync());
+        var first = await store.GetKnowledgeProjectionAsync("decision-v1");
+        Assert.NotNull(first);
+        Assert.Contains(first.Entities, entity => entity.EntityType == "person" && entity.Label == "Ana Torres");
+        Assert.Contains(first.Entities, entity => entity.EntityType == "person" && entity.Label == "Luis Pérez");
+        Assert.Contains(first.Entities, entity => entity.EntityType == "date" && entity.Label == "2026-08-12");
+        Assert.Contains(first.Entities, entity => entity.EntityType == "date" && entity.Label == "2026-08-13");
+        Assert.Contains(first.Relations, relation => relation.RelationType == "STORED_AS_VERSION" && relation.EvidenceClass == "VERIFIED");
+
+        var correction = await store.GetKnowledgeProjectionAsync("decision-v2");
+        Assert.NotNull(correction);
+        Assert.Contains(correction.Relations, relation => relation.RelationType == "SUPERSEDES" && relation.EvidenceClass == "EXTRACTED");
+        Assert.Contains(correction.Relations, relation => relation.RelationType == "CORRECTS_VERSION" && relation.EvidenceClass == "EXTRACTED");
+        Assert.DoesNotContain(correction.Relations, relation => relation.RelationType == "SUPERSEDES" && relation.EvidenceClass == "VERIFIED");
+    }
+
+    [Fact]
     public async Task Verified_file_metadata_produces_verified_file_and_hash_relations()
     {
         await using var store = new SqliteMemoryStore(NewLayout());
@@ -324,6 +373,8 @@ public sealed class MemoryStoreTests
         await store.ProjectPendingKnowledgeAsync();
 
         var hits = await store.QueryAsync(new MemoryQuery("AlphaNebula", Limit: 5, Project: "hermes"), Vector(1, 0));
+        Assert.True(hits[0].Atom.VersionId == "engine-correction",
+            string.Join(" | ", hits.Select(hit => $"{hit.Atom.VersionId}:{hit.Score:F4}/k={hit.Knowledge?.Score:F4}/t={hit.TextScore:F4}/s={hit.SemanticScore:F4}")));
         var correction = Assert.Single(hits, hit => hit.Atom.VersionId == "engine-correction");
         Assert.NotNull(correction.Knowledge);
         Assert.Contains(correction.Knowledge.Reasons, reason => reason == "file:src/engine.js");

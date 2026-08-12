@@ -11,7 +11,7 @@ namespace HyperMemory.Installer;
 
 internal static class Program
 {
-    private const string ProductVersion = "1.4.0";
+    private const string ProductVersion = "1.7.0";
     private const string MemoryProviderName = "hypermemory";
     private const string RunKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
     private const string UninstallKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\HyperMemory";
@@ -61,6 +61,9 @@ internal static class Program
         var skillPath = Path.GetFullPath(Path.Combine(hermesBase, "skills", "hyper-memory"));
         var pluginPath = Path.GetFullPath(Path.Combine(hermesBase, "plugins", MemoryProviderName));
         var upgradeManifestPath = FindOwnedUpgradeManifest(activeInstallationPath, root, hermesBase);
+        MigrationBackup? upgradeBackup = null;
+        var upgradeDetached = false;
+        string? newApiExecutable = null;
         var previousMemoryProvider = GetHermesConfigValue(hermesBase, "memory.provider");
         if (!string.IsNullOrWhiteSpace(previousMemoryProvider) &&
             !string.Equals(previousMemoryProvider, MemoryProviderName, StringComparison.OrdinalIgnoreCase))
@@ -80,6 +83,7 @@ internal static class Program
             Directory.CreateDirectory(release);
             ExtractPayload(release);
             var apiExe = RequiredFile(Path.Combine(release, "api", "HyperMemory.Api.exe"));
+            newApiExecutable = apiExe;
             var bridgeDirectory = Path.Combine(release, "bridge");
             RequiredFile(Path.Combine(bridgeDirectory, "HyperMemory.Bridge.exe"));
             var skillSource = RequiredFile(Path.Combine(release, "skill", "SKILL.md"));
@@ -89,8 +93,12 @@ internal static class Program
 
             if (upgradeManifestPath is not null)
             {
+                var previousManifest = ReadManifest(upgradeManifestPath);
+                upgradeBackup = CreateMigrationBackup(previousManifest, upgradeManifestPath, installId);
                 var result = Uninstall(new Options(true, false, false, true, null, null, upgradeManifestPath));
                 if (result != 0) throw new InvalidOperationException("No se pudo retirar de forma segura la instalación anterior.");
+                upgradeDetached = true;
+                upgradeBackup = CompleteMigrationBackup(upgradeBackup);
             }
             ValidateNewSkillTarget(skillPath);
             ValidateNewPluginTarget(pluginPath);
@@ -143,8 +151,15 @@ internal static class Program
         }
         catch
         {
+            if (newApiExecutable is not null)
+            {
+                try { StopOwnedApi(newApiExecutable); }
+                catch (Exception error) { Log($"Rollback could not stop the new API: {error}"); }
+            }
             RollbackFailedInstall(installId, hermesBase, skillPath, pluginPath, previousMemoryProvider,
                 configurationChanged, manifestPath, activeInstallationPath);
+            if (upgradeDetached && upgradeBackup is not null)
+                RestoreMigrationBackup(upgradeBackup);
             throw;
         }
     }
@@ -204,13 +219,26 @@ internal static class Program
         var manifest = ReadManifest(manifestPath);
         if (!IsActiveInstallation(manifest, manifestPath))
             throw new InvalidOperationException("Esta instalación ya no es la instalación activa. No se modificó Hermes.");
+        var eraseMemory = options.EraseMemory;
+        if (options.Silent && eraseMemory &&
+            !string.Equals(Path.GetFullPath(options.ConfirmStorageRoot ?? ""), Path.GetFullPath(manifest.StorageRoot), StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("Para borrar memoria en modo silencioso se requiere --confirm-storage-root con la ruta exacta.");
         if (!options.Silent)
         {
             ApplicationConfiguration.Initialize();
             var answer = MessageBox.Show(
-                "Se retirará HyperMemory de Hermes y del inicio automático. La memoria histórica se conservará como respaldo y no afectará al agente. ¿Continuar?",
+                "Se retirará HyperMemory de Hermes y del inicio automático sin afectar al agente. ¿Continuar?",
                 "Desinstalar HyperMemory", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
             if (answer != DialogResult.Yes) return 0;
+            var dataChoice = MessageBox.Show(
+                "¿Deseas CONSERVAR la memoria histórica para poder recuperarla más adelante?\n\nSí = conservar (recomendado)\nNo = borrar permanentemente\nCancelar = no desinstalar",
+                "Memoria histórica", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
+            if (dataChoice == DialogResult.Cancel) return 0;
+            eraseMemory = dataChoice == DialogResult.No;
+            if (eraseMemory && MessageBox.Show(
+                    $"La memoria de esta ubicación se borrará de forma permanente:\n\n{manifest.StorageRoot}\n\nEsta acción no se puede deshacer. ¿Confirmas el borrado?",
+                    "Confirmar borrado permanente", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
+                return 0;
         }
 
         StopOwnedSupervisor(manifest);
@@ -223,18 +251,64 @@ internal static class Program
         if (!string.IsNullOrWhiteSpace(manifest.ActiveInstallationPath))
             WriteCurrentJson(manifest.ActiveInstallationPath,
                 new ActiveInstallation(manifest.InstallId, manifestPath, manifest.Version, "uninstalled"));
+        if (eraseMemory) EraseHistoricalMemory(manifest);
         var receipt = Path.Combine(manifest.StorageRoot, $"UNINSTALLED-{DateTime.UtcNow:yyyyMMddTHHmmssfffZ}.txt");
         using (var writer = new StreamWriter(new FileStream(receipt, FileMode.CreateNew, FileAccess.Write, FileShare.Read)))
         {
             writer.WriteLine("HyperMemory was detached from Hermes and Windows startup.");
-            writer.WriteLine("Historical memory and installed binaries were preserved by the zero-deletion policy.");
+            writer.WriteLine(eraseMemory
+                ? "Historical memory was permanently erased after explicit confirmation. Installed binaries were preserved."
+                : "Historical memory and installed binaries were preserved for recovery.");
             writer.WriteLine($"Installation: {manifest.InstallId}");
         }
-        Log($"Uninstalled integration {manifest.InstallId}; data preserved at {manifest.StorageRoot}");
+        Log($"Uninstalled integration {manifest.InstallId}; historical memory {(eraseMemory ? "erased" : "preserved")} at {manifest.StorageRoot}");
         if (!options.Silent)
-            MessageBox.Show("HyperMemory se retiró correctamente de Hermes. La memoria histórica quedó conservada como respaldo.",
+            MessageBox.Show(eraseMemory
+                    ? "HyperMemory se retiró correctamente de Hermes y la memoria histórica fue borrada."
+                    : "HyperMemory se retiró correctamente de Hermes. La memoria histórica quedó conservada como respaldo.",
                 "HyperMemory", MessageBoxButtons.OK, MessageBoxIcon.Information);
         return 0;
+    }
+
+    private static void EraseHistoricalMemory(InstallationManifest manifest)
+    {
+        var root = Path.GetFullPath(manifest.StorageRoot);
+        if (!string.Equals(Path.GetFileName(root), "Hyper_Memory", StringComparison.OrdinalIgnoreCase) ||
+            !Directory.Exists(root) || (new DirectoryInfo(root).Attributes & FileAttributes.ReparsePoint) != 0)
+            throw new InvalidOperationException("La raíz de memoria no supera las comprobaciones de seguridad; no se borró ningún recuerdo.");
+
+        var eventsPath = Path.Combine(root, "events");
+        DeleteExactDataDirectory(eventsPath, Path.Combine(root, "events"));
+        foreach (var file in new[] { "hypermemory.sqlite3", "hypermemory.sqlite3-wal", "hypermemory.sqlite3-shm" })
+        {
+            var path = Path.GetFullPath(Path.Combine(root, file));
+            if (!string.Equals(Path.GetDirectoryName(path), root, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("La ruta de datos no es segura.");
+            if (File.Exists(path)) File.Delete(path);
+        }
+
+        var migrationRoot = Path.Combine(root, "app", "migration-backups");
+        if (Directory.Exists(migrationRoot))
+        {
+            if ((new DirectoryInfo(migrationRoot).Attributes & FileAttributes.ReparsePoint) != 0)
+                throw new InvalidOperationException("La carpeta de respaldos es un enlace; no se borraron los respaldos.");
+            foreach (var backup in Directory.EnumerateDirectories(migrationRoot, "*", SearchOption.TopDirectoryOnly))
+                DeleteExactDataDirectory(Path.Combine(backup, "database"), Path.Combine(backup, "database"));
+        }
+    }
+
+    private static void DeleteExactDataDirectory(string actual, string expected)
+    {
+        actual = Path.GetFullPath(actual);
+        expected = Path.GetFullPath(expected);
+        if (!string.Equals(actual, expected, StringComparison.OrdinalIgnoreCase) || !Directory.Exists(actual)) return;
+        var root = new DirectoryInfo(actual);
+        if ((root.Attributes & FileAttributes.ReparsePoint) != 0)
+            throw new InvalidOperationException("La carpeta de datos es un enlace; no se borró.");
+        foreach (var entry in root.EnumerateFileSystemInfos("*", SearchOption.AllDirectories))
+            if ((entry.Attributes & FileAttributes.ReparsePoint) != 0)
+                throw new InvalidOperationException("Los datos contienen un enlace; no se borraron.");
+        Directory.Delete(actual, recursive: true);
     }
 
     private static void RemoveOwnedStartup(InstallationManifest manifest, string manifestPath)
@@ -303,6 +377,137 @@ internal static class Program
             if (File.Exists(manifestPath)) File.Move(manifestPath, manifestPath + ".failed", overwrite: false);
         }
         catch (Exception error) { Log($"Rollback could not retire failed manifest: {error}"); }
+    }
+
+    private static MigrationBackup CreateMigrationBackup(InstallationManifest previous, string previousManifestPath,
+        string incomingInstallId)
+    {
+        var backupDirectory = Path.GetFullPath(Path.Combine(previous.StorageRoot, "app", "migration-backups", incomingInstallId));
+        var expectedParent = Path.GetFullPath(Path.Combine(previous.StorageRoot, "app", "migration-backups"));
+        if (!string.Equals(Path.GetDirectoryName(backupDirectory), expectedParent, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("La ruta del respaldo de actualización no es segura.");
+        if (Directory.Exists(backupDirectory) || File.Exists(backupDirectory))
+            throw new IOException("Ya existe un respaldo con el identificador de esta actualización.");
+
+        Directory.CreateDirectory(backupDirectory);
+        var integrationDirectory = Path.Combine(backupDirectory, "integration");
+        Directory.CreateDirectory(integrationDirectory);
+        SafeCopyDirectory(previous.SkillPath, Path.Combine(integrationDirectory, "skill"));
+        if (!string.IsNullOrWhiteSpace(previous.PluginPath) && Directory.Exists(previous.PluginPath))
+            SafeCopyDirectory(previous.PluginPath, Path.Combine(integrationDirectory, "plugin"));
+        File.Copy(previousManifestPath, Path.Combine(backupDirectory, "previous-installation.json"), overwrite: false);
+
+        var backup = BuildMigrationBackup(previous, previousManifestPath, backupDirectory, databaseSnapshotComplete: false);
+        WriteNewJson(Path.Combine(backupDirectory, "backup-manifest.json"), backup);
+        ValidateMigrationBackup(backup);
+        return backup;
+    }
+
+    private static MigrationBackup CompleteMigrationBackup(MigrationBackup backup)
+    {
+        var dataDirectory = Path.Combine(backup.BackupDirectory, "database");
+        Directory.CreateDirectory(dataDirectory);
+        var database = Path.Combine(backup.PreviousInstallation.StorageRoot, "hypermemory.sqlite3");
+        foreach (var source in new[] { database, database + "-wal", database + "-shm" })
+            if (File.Exists(source))
+                File.Copy(source, Path.Combine(dataDirectory, Path.GetFileName(source)), overwrite: false);
+
+        var completed = BuildMigrationBackup(backup.PreviousInstallation, backup.PreviousManifestPath,
+            backup.BackupDirectory, databaseSnapshotComplete: true);
+        WriteCurrentJson(Path.Combine(backup.BackupDirectory, "backup-manifest.json"), completed);
+        ValidateMigrationBackup(completed);
+        return completed;
+    }
+
+    private static MigrationBackup BuildMigrationBackup(InstallationManifest previous, string previousManifestPath,
+        string backupDirectory, bool databaseSnapshotComplete)
+    {
+        var files = Directory.EnumerateFiles(backupDirectory, "*", SearchOption.AllDirectories)
+            .Where(path => !string.Equals(Path.GetFileName(path), "backup-manifest.json", StringComparison.OrdinalIgnoreCase))
+            .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+            .Select(path => new BackupFile(Path.GetRelativePath(backupDirectory, path), new FileInfo(path).Length,
+                HashFile(path)))
+            .ToArray();
+        return new MigrationBackup(Guid.NewGuid().ToString("N"), DateTimeOffset.UtcNow, backupDirectory,
+            previousManifestPath, previous, databaseSnapshotComplete, files);
+    }
+
+    private static void ValidateMigrationBackup(MigrationBackup backup)
+    {
+        var boundary = Path.GetFullPath(backup.BackupDirectory).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        if (backup.Files.Count == 0) throw new InvalidOperationException("El respaldo de actualización está vacío.");
+        foreach (var item in backup.Files)
+        {
+            var path = Path.GetFullPath(Path.Combine(backup.BackupDirectory, item.RelativePath));
+            if (!path.StartsWith(boundary, StringComparison.OrdinalIgnoreCase) || !File.Exists(path))
+                throw new InvalidOperationException("El respaldo de actualización contiene una ruta no válida.");
+            var info = new FileInfo(path);
+            var hash = HashFile(path);
+            if (info.Length != item.Length || !string.Equals(hash, item.Sha256, StringComparison.Ordinal))
+                throw new InvalidOperationException($"Falló la integridad del respaldo: {item.RelativePath}");
+        }
+    }
+
+    private static void RestoreMigrationBackup(MigrationBackup backup)
+    {
+        ValidateMigrationBackup(backup);
+        var previous = backup.PreviousInstallation;
+        if (Directory.Exists(previous.SkillPath) || File.Exists(previous.SkillPath) ||
+            (!string.IsNullOrWhiteSpace(previous.PluginPath) && (Directory.Exists(previous.PluginPath) || File.Exists(previous.PluginPath))))
+            throw new InvalidOperationException("No se puede restaurar la versión anterior porque uno de sus destinos está ocupado.");
+
+        SafeCopyDirectory(Path.Combine(backup.BackupDirectory, "integration", "skill"), previous.SkillPath);
+        var pluginBackup = Path.Combine(backup.BackupDirectory, "integration", "plugin");
+        if (!string.IsNullOrWhiteSpace(previous.PluginPath) && Directory.Exists(pluginBackup))
+            SafeCopyDirectory(pluginBackup, previous.PluginPath);
+
+        if (backup.DatabaseSnapshotComplete)
+            RestoreDatabaseSnapshot(backup);
+
+        SetHermesConfigValue(previous.HermesRoot, "memory.provider", MemoryProviderName);
+        WriteCurrentJson(previous.ActiveInstallationPath!,
+            new ActiveInstallation(previous.InstallId, backup.PreviousManifestPath, previous.Version));
+        var launchCommand = $"\"{previous.InstallerExecutable}\" --supervise --manifest \"{backup.PreviousManifestPath}\"";
+        using (var runKey = Registry.CurrentUser.CreateSubKey(RunKeyPath, writable: true))
+            runKey.SetValue(RegistryValueName, launchCommand, RegistryValueKind.String);
+        RegisterUninstaller(previous, backup.PreviousManifestPath);
+        Process.Start(new ProcessStartInfo(previous.InstallerExecutable,
+            $"--supervise --manifest \"{backup.PreviousManifestPath}\"")
+        { UseShellExecute = false, CreateNoWindow = true });
+        Log($"Restored previous installation {previous.InstallId} from verified backup {backup.BackupId}");
+    }
+
+    private static void RestoreDatabaseSnapshot(MigrationBackup backup)
+    {
+        var database = Path.GetFullPath(Path.Combine(backup.PreviousInstallation.StorageRoot, "hypermemory.sqlite3"));
+        var storageBoundary = Path.GetFullPath(backup.PreviousInstallation.StorageRoot).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        if (!database.StartsWith(storageBoundary, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("La ruta de la base de datos no es segura.");
+        var snapshotDirectory = Path.Combine(backup.BackupDirectory, "database");
+        foreach (var target in new[] { database, database + "-wal", database + "-shm" })
+        {
+            var source = Path.Combine(snapshotDirectory, Path.GetFileName(target));
+            if (File.Exists(target)) File.Delete(target);
+            if (File.Exists(source)) File.Copy(source, target, overwrite: false);
+        }
+    }
+
+    private static void SafeCopyDirectory(string source, string destination)
+    {
+        if (!Directory.Exists(source)) throw new DirectoryNotFoundException(source);
+        var root = new DirectoryInfo(source);
+        if ((root.Attributes & FileAttributes.ReparsePoint) != 0)
+            throw new InvalidOperationException("No se respaldará una carpeta que sea enlace o unión.");
+        foreach (var entry in root.EnumerateFileSystemInfos("*", SearchOption.AllDirectories))
+            if ((entry.Attributes & FileAttributes.ReparsePoint) != 0)
+                throw new InvalidOperationException("El respaldo contiene un enlace o unión y fue rechazado.");
+        CopyNewDirectory(source, destination);
+    }
+
+    private static string HashFile(string path)
+    {
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+        return Convert.ToHexString(SHA256.HashData(stream));
     }
 
     private static void TryRemoveCreatedDirectory(string path, string installId)
@@ -686,7 +891,8 @@ internal static class Program
         catch { }
     }
 
-    private sealed record Options(bool Silent, bool Launch, bool Supervise, bool Uninstall, string? StorageRoot, string? HermesRoot, string? Manifest)
+    private sealed record Options(bool Silent, bool Launch, bool Supervise, bool Uninstall, string? StorageRoot,
+        string? HermesRoot, string? Manifest, bool EraseMemory = false, string? ConfirmStorageRoot = null)
     {
         public static Options Parse(string[] args)
         {
@@ -699,7 +905,9 @@ internal static class Program
                 args.Any(x => x.Equals("--launch", StringComparison.OrdinalIgnoreCase)),
                 args.Any(x => x.Equals("--supervise", StringComparison.OrdinalIgnoreCase)),
                 args.Any(x => x.Equals("--uninstall", StringComparison.OrdinalIgnoreCase)),
-                Value("--storage-root"), Value("--hermes-root"), Value("--manifest"));
+                Value("--storage-root"), Value("--hermes-root"), Value("--manifest"),
+                args.Any(x => x.Equals("--erase-memory", StringComparison.OrdinalIgnoreCase)),
+                Value("--confirm-storage-root"));
         }
     }
 
@@ -712,4 +920,8 @@ internal static class Program
         bool CaptureEnabled, bool UserOptOutEnabled);
     internal sealed record ActiveInstallation(string InstallId, string ManifestPath, string Version, string Status = "active");
     internal sealed record SupervisorState(int ProcessId, string InstallId, string Executable);
+    internal sealed record BackupFile(string RelativePath, long Length, string Sha256);
+    internal sealed record MigrationBackup(string BackupId, DateTimeOffset CreatedAt, string BackupDirectory,
+        string PreviousManifestPath, InstallationManifest PreviousInstallation, bool DatabaseSnapshotComplete,
+        IReadOnlyList<BackupFile> Files);
 }

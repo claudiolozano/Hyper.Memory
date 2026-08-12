@@ -26,7 +26,7 @@ HyperMemory is a local, model-agnostic, append-only automatic memory service for
 - Event IDs are idempotency keys. Reusing one with different content is rejected.
 - Provenance, validity ranges, claim keys and supersession links are append-only evidence attached to each version.
 - Contradictions preserve both records. They never trigger automatic rewriting or deletion.
-- There is no delete, purge, retention, vacuum, or destructive repair API.
+- There is no delete, purge, retention, vacuum, or destructive repair API. The Windows uninstaller alone can erase installation-owned historical storage after explicit double confirmation; preservation is the default.
 - Full input is committed before optional background summarization. A summary is another append.
 
 SQLite necessarily updates its own database pages and WAL as part of ACID operation; the invariant is that historical memory records are never updated or deleted. Immutable event envelopes provide an additional raw recovery layer. For physical disaster recovery, back up the complete `Hyper_Memory` directory at the filesystem level.
@@ -63,6 +63,14 @@ The same runner accepts the official JSON schemas for [LoCoMo](https://github.co
 ```powershell
 .\scripts\Run-Evaluation.ps1 -Dataset C:\benchmarks\locomo10.json -Format locomo -Limit 100 -TopK 5 -Output artifacts\evaluation\locomo.json
 .\scripts\Run-Evaluation.ps1 -Dataset C:\benchmarks\longmemeval_s_cleaned.json -Format longmemeval -Limit 100 -TopK 5 -Output artifacts\evaluation\longmemeval.json
+```
+
+The synthetic scale profile uses the real append-only event envelopes, SQLite indexes, incremental knowledge projector,
+maintenance, retrieval and full integrity verification. A release-scale run is explicit because 100,000 immutable
+events are intentionally expensive and must not slow every ordinary build:
+
+```powershell
+.\scripts\Run-Evaluation.ps1 -SyntheticCount 100000 -Output artifacts\evaluation\scale-100k.json
 ```
 
 ## Controlled graph import

@@ -4,6 +4,13 @@ using HyperMemory.Core;
 using HyperMemory.Infrastructure;
 using Microsoft.Extensions.Options;
 
+var scaleExitCode = await ScaleProfileRunner.TryRunAsync(args);
+if (scaleExitCode is not null)
+{
+    Environment.ExitCode = scaleExitCode.Value;
+    return;
+}
+
 var externalExitCode = await ExternalBenchmarkRunner.TryRunAsync(args);
 if (externalExitCode is not null)
 {

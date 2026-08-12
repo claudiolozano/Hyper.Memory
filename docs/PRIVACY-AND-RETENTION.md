@@ -12,6 +12,6 @@ HyperMemory is designed for durable historical recall, so its default retention 
 
 ## Retention policy
 
-The current policy is `indefinite-until-explicit-user-action`. Automated age-based deletion is intentionally absent because it would undermine historical memory and could destroy evidence without informed consent. The current safe uninstaller removes HyperMemory from Hermes but preserves the historical `Hyper_Memory` folder as a backup; it does not yet offer physical erasure.
+The current policy is `indefinite-until-explicit-user-action`. Automated age-based deletion is intentionally absent because it would undermine historical memory and could destroy evidence without informed consent. The safe uninstaller preserves historical memory by default. Its interactive permanent-erasure choice requires a separate second confirmation and reports the exact storage root. Silent erasure additionally requires `--erase-memory` plus `--confirm-storage-root` matching that exact root.
 
-HyperMemory does not claim that pattern detection can recognize every possible secret. Users should still avoid placing raw credentials in conversations. Future physical erasure controls must use an authenticated, previewable operation with an export/backup option and exact scope reporting; they must not be implemented as a broad or silent cleanup.
+HyperMemory does not claim that pattern detection can recognize every possible secret. Users should still avoid placing raw credentials in conversations. Physical erasure is deliberately confined to the SQLite store, immutable event envelopes and database snapshots owned by the verified installation. It does not recursively delete the storage root or any Hermes directory.

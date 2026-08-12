@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -9,7 +10,7 @@ using Microsoft.Extensions.Options;
 
 namespace HyperMemory.Infrastructure;
 
-public sealed class SqliteMemoryStore : IMemoryStore, IKnowledgeProjectionStore, IScaleMaintenanceStore,
+public sealed partial class SqliteMemoryStore : IMemoryStore, IKnowledgeProjectionStore, IScaleMaintenanceStore,
     IOperationalDiagnosticsStore, IAsyncDisposable
 {
     private const string TurnSeparator = "\n\nHermes response:\n";
@@ -294,7 +295,7 @@ public sealed class SqliteMemoryStore : IMemoryStore, IKnowledgeProjectionStore,
         await using var connection = await OpenAsync(cancellationToken);
         var candidates = new Dictionary<string, Candidate>(StringComparer.Ordinal);
         var searchTokens = TokenizeSearch(query.Text);
-        var ftsQuery = BuildFtsQuery(searchTokens);
+        var ftsQuery = BuildFtsQuery(query.Text, searchTokens);
         if (ftsQuery.Length > 0)
         {
             var textMatches = new List<(MemoryAtom Atom, double Rank)>();
@@ -389,9 +390,14 @@ public sealed class SqliteMemoryStore : IMemoryStore, IKnowledgeProjectionStore,
         var ranked = candidates.Values
             .Select(x =>
             {
-                var baseScore = (x.Text * query.TextWeight + x.Semantic * query.SemanticWeight) / weightSum *
+                var weightedScore = (x.Text * query.TextWeight + x.Semantic * query.SemanticWeight) / weightSum;
+                // Near-exact lexical evidence is stronger than an unsupported
+                // semantic match. This preserves old identifiers and exact
+                // constraints even when the bounded recent vector window is noisy.
+                var evidenceScore = Math.Max(weightedScore, x.Text * 0.90d);
+                var baseScore = evidenceScore *
                     (recallQuery ? RecallUtility(x.Atom) : 1d) * WorkspaceAffinity(x.Atom, query.PreferredWorkspace);
-                var knowledgeScore = x.Knowledge * (recallQuery ? 0.95d : 0.82d);
+                var knowledgeScore = x.Knowledge * (recallQuery ? 0.95d : 1d);
                 return new RankedCandidate(x, Math.Clamp(Math.Max(baseScore, knowledgeScore), 0, 1));
             })
             .OrderByDescending(x => x.Score).ThenByDescending(x => x.Candidate.Atom.Sequence)
@@ -407,9 +413,11 @@ public sealed class SqliteMemoryStore : IMemoryStore, IKnowledgeProjectionStore,
         CancellationToken cancellationToken)
     {
         if (candidates.Count == 0 || searchTokens.Count == 0) return;
-        var seeds = candidates.Values.OrderByDescending(candidate => Math.Max(candidate.Text, candidate.Semantic))
+        var seeds = candidates.Values.Where(candidate => Math.Max(candidate.Text, candidate.Semantic) > 0)
+            .OrderByDescending(candidate => Math.Max(candidate.Text, candidate.Semantic))
             .Take(20).Select(candidate => candidate.Atom.VersionId).ToArray();
         if (seeds.Length == 0) return;
+        var newestSeedSequence = seeds.Max(versionId => candidates[versionId].Atom.Sequence);
         var normalizedQuery = NormalizeKnowledgeLabel(query.Text);
         var related = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
         await using (var command = connection.CreateCommand())
@@ -478,7 +486,8 @@ public sealed class SqliteMemoryStore : IMemoryStore, IKnowledgeProjectionStore,
                 // A seed must not boost itself merely because it owns an entity;
                 // only a direct entity-label match is additional evidence. This
                 // prevents graph metadata from flattening exact lexical ranking.
-                if (!directLabelMatch) continue;
+                if (!directLabelMatch && Math.Max(existing.Text, existing.Semantic) > 0) continue;
+                if (!directLabelMatch && existing.Atom.Sequence > newestSeedSequence) score = 1d;
                 candidates[versionId] = existing with
                 {
                     Knowledge = Math.Max(existing.Knowledge, score),
@@ -488,7 +497,8 @@ public sealed class SqliteMemoryStore : IMemoryStore, IKnowledgeProjectionStore,
             }
             var atom = await ReadAtomByVersionAsync(connection, versionId, cancellationToken);
             if (atom is not null)
-                candidates[versionId] = new Candidate(atom, 0, 0, score,
+                candidates[versionId] = new Candidate(atom, 0, 0,
+                    atom.Sequence > newestSeedSequence ? 1d : score,
                     reasons.OrderBy(value => value, StringComparer.Ordinal).Take(8).ToArray());
         }
     }
@@ -642,8 +652,25 @@ public sealed class SqliteMemoryStore : IMemoryStore, IKnowledgeProjectionStore,
         .Take(32)
         .ToArray();
 
-    private static string BuildFtsQuery(IReadOnlyList<string> tokens) => string.Join(" OR ",
-        tokens.Select(token => $"\"{token.Replace("\"", "\"\"")}\""));
+    private static string BuildFtsQuery(string original, IReadOnlyList<string> tokens)
+    {
+        var identifiers = new List<string>();
+        foreach (Match identifier in StructuredIdentifierRegex().Matches(NormalizeSearch(original)))
+        {
+            var parts = Regex.Matches(identifier.Value, @"[\p{L}\p{N}]+")
+                .Select(match => match.Value).Where(part => part.Length > 0).ToArray();
+            if (parts.Length >= 2)
+                identifiers.Add($"\"{string.Join(' ', parts).Replace("\"", "\"\"")}\"");
+        }
+        // A structured identifier is a stronger constraint than any individual
+        // component. OR-ing its generic prefix back into the query can crowd an
+        // old exact hit out of the bounded FTS candidate set at multi-year scale.
+        if (identifiers.Count > 0)
+            return string.Join(" OR ", identifiers.Distinct(StringComparer.Ordinal));
+        var terms = new List<string>();
+        terms.AddRange(tokens.Select(token => $"\"{token.Replace("\"", "\"\"")}\""));
+        return string.Join(" OR ", terms.Distinct(StringComparer.Ordinal));
+    }
 
     private static string NormalizeSearch(string value)
     {
@@ -655,6 +682,9 @@ public sealed class SqliteMemoryStore : IMemoryStore, IKnowledgeProjectionStore,
                 builder.Append(character);
         return builder.ToString().Normalize(NormalizationForm.FormC);
     }
+
+    [GeneratedRegex(@"(?<![\p{L}\p{N}])[\p{L}\p{N}]+(?:[-_.:/][\p{L}\p{N}]+)+(?![\p{L}\p{N}])", RegexOptions.CultureInvariant)]
+    private static partial Regex StructuredIdentifierRegex();
 
     private static double TokenCoverage(string content, IReadOnlyList<string> tokens)
     {
@@ -770,7 +800,7 @@ public sealed class SqliteMemoryStore : IMemoryStore, IKnowledgeProjectionStore,
             {
                 command.CommandText = """
                     SELECT a.version_id,a.logical_id,a.content,a.project,a.source,a.metadata_json,
-                           e.source_uri,e.author,e.claim_key
+                           e.source_uri,e.author,e.claim_key,e.supersedes_version_id,a.occurred_at
                     FROM memory_atoms a
                     LEFT JOIN memory_evidence e ON e.version_id=a.version_id
                     LEFT JOIN knowledge_projection_state p ON p.version_id=a.version_id
@@ -784,7 +814,8 @@ public sealed class SqliteMemoryStore : IMemoryStore, IKnowledgeProjectionStore,
                     pending.Add(new KnowledgeProjectionInput(
                         reader.GetString(0), reader.GetString(1), reader.GetString(2), NullableString(reader, 3),
                         NullableString(reader, 4), reader.GetString(5), NullableString(reader, 6),
-                        NullableString(reader, 7), NullableString(reader, 8)));
+                        NullableString(reader, 7), NullableString(reader, 8), NullableString(reader, 9),
+                        DateTimeOffset.Parse(reader.GetString(10), CultureInfo.InvariantCulture)));
             }
             if (pending.Count == 0) return 0;
 
@@ -946,7 +977,7 @@ public sealed class SqliteMemoryStore : IMemoryStore, IKnowledgeProjectionStore,
         var walBytes = File.Exists(walPath) ? new FileInfo(walPath).Length : 0;
         var semanticWindow = Math.Min(_recentSemanticCandidateLimit, atoms > int.MaxValue ? int.MaxValue : (int)atoms);
         var semanticCoverage = atoms == 0 ? 1d : Math.Round(Math.Min(1d, semanticWindow / (double)atoms), 4);
-        var annRecommended = atoms > Math.Max(100_000, _recentSemanticCandidateLimit * 20L);
+        var annRecommended = atoms >= Math.Max(100_000, _recentSemanticCandidateLimit * 20L);
         var status = fts != atoms ? "degraded" : pending > 0 ? "catching_up" : annRecommended ? "ann_evaluation_recommended" : "ready";
         return new MemoryScaleStatus(status, atoms, databaseBytes, walBytes, pages, freePages, fts == atoms,
             semanticWindow, semanticCoverage, pending, annRecommended);

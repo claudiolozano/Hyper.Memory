@@ -45,7 +45,7 @@ if (!string.IsNullOrWhiteSpace(authToken))
         await next();
     });
 }
-app.MapGet("/live", () => Results.Ok(new { product = "HyperMemory", status = "alive", apiVersion = "1.4.0", processId = Environment.ProcessId }));
+app.MapGet("/live", () => Results.Ok(new { product = "HyperMemory", status = "alive", apiVersion = "1.7.0", processId = Environment.ProcessId }));
 app.MapGet("/health", async (IMemoryStore memoryStore, CancellationToken ct) =>
 {
     var status = await memoryStore.GetStatusAsync(ct);
@@ -54,7 +54,7 @@ app.MapGet("/health", async (IMemoryStore memoryStore, CancellationToken ct) =>
         {
             product = "HyperMemory",
             status = status.Status,
-            apiVersion = "1.4.0",
+            apiVersion = "1.7.0",
             processId = Environment.ProcessId,
             storageRoot = status.StorageRoot,
             counts = status,

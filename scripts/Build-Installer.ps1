@@ -1,6 +1,6 @@
 param(
     [string]$Runtime = "win-x64",
-    [string]$Version = "1.4.0",
+    [string]$Version = "1.7.0",
     [string]$CertificateThumbprint = "",
     [ValidateSet("CurrentUser", "LocalMachine")][string]$CertificateStore = "CurrentUser",
     [string]$TimestampUrl = "http://timestamp.digicert.com"
@@ -78,6 +78,8 @@ Interactive installation: double-click HyperMemorySetup.exe
 Silent installation: HyperMemorySetup.exe --silent --storage-root "D:\"
 Silent mode starts HyperMemory at the next Windows sign-in.
 Silent uninstall is registered automatically in Windows Apps.
+Silent uninstall preserves memory by default. Permanent erasure additionally requires
+--erase-memory --confirm-storage-root "<exact Hyper_Memory path>".
 
 SHA256: $hash
 Authenticode: $signature

@@ -16,7 +16,9 @@ internal sealed record KnowledgeProjectionInput(
     string MetadataJson,
     string? SourceUri,
     string? Author,
-    string? ClaimKey);
+    string? ClaimKey,
+    string? SupersedesVersionId,
+    DateTimeOffset OccurredAt);
 
 internal sealed record KnowledgeMention(
     string MentionId,
@@ -35,7 +37,7 @@ internal sealed record ExtractedKnowledge(
 
 internal static partial class DeterministicKnowledgeExtractor
 {
-    public const string Version = "1.1.0";
+    public const string Version = "1.2.0";
     private const string TurnSeparator = "\n\nHermes response:\n";
 
     public static ExtractedKnowledge Extract(KnowledgeProjectionInput input)
@@ -49,12 +51,34 @@ internal static partial class DeterministicKnowledgeExtractor
         var requestId = AddEntity("request", input.VersionId, Summarize(request), entities);
         AddMention(requestId, "request", "EXTRACTED", 1, 0, request.Length, input, mentions);
 
+        var versionEntity = AddEntity("memory_version", input.VersionId, input.VersionId, entities);
+        AddMention(versionEntity, "immutable_memory_version", "VERIFIED", 1, null, null, input, mentions);
+        AddRelation(requestId, versionEntity, "STORED_AS_VERSION", "VERIFIED", 1, input.VersionId, relations);
+
+        var occurredDate = input.OccurredAt.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+        var occurredDateEntity = AddEntity("date", occurredDate, occurredDate, entities);
+        AddMention(occurredDateEntity, "occurred_date", "VERIFIED", 1, null, null, input, mentions);
+        AddRelation(versionEntity, occurredDateEntity, "OCCURRED_ON", "VERIFIED", 1, input.VersionId, relations);
+
+        ProjectStructuredTextEntities(request, requestId, 0, input, entities, relations, mentions);
+
         string? responseId = null;
         if (!string.IsNullOrWhiteSpace(response))
         {
             responseId = AddEntity("response", input.VersionId, Summarize(response), entities);
             AddMention(responseId, "response", "EXTRACTED", 1, responseOffset, responseOffset + response.Length, input, mentions);
             AddRelation(requestId, responseId, "HAS_RESPONSE", "EXTRACTED", 1, input.VersionId, relations);
+            AddRelation(responseId, versionEntity, "STORED_AS_VERSION", "VERIFIED", 1, input.VersionId, relations);
+            ProjectStructuredTextEntities(response, responseId, responseOffset, input, entities, relations, mentions);
+        }
+
+        if (!string.IsNullOrWhiteSpace(input.SupersedesVersionId))
+        {
+            var previousVersion = AddEntity("memory_version", input.SupersedesVersionId, input.SupersedesVersionId, entities);
+            AddMention(previousVersion, "superseded_memory_version", "EXTRACTED", 1, null, null, input, mentions);
+            AddRelation(versionEntity, previousVersion, "SUPERSEDES", "EXTRACTED", 1, input.VersionId, relations);
+            AddRelation(responseId ?? requestId, previousVersion, "CORRECTS_VERSION", "EXTRACTED", 1,
+                input.VersionId, relations);
         }
 
         if (!string.IsNullOrWhiteSpace(input.Project))
@@ -294,6 +318,44 @@ internal static partial class DeterministicKnowledgeExtractor
         }
     }
 
+    private static void ProjectStructuredTextEntities(string text, string ownerEntity, int baseOffset,
+        KnowledgeProjectionInput input, IDictionary<string, KnowledgeEntity> entities,
+        IDictionary<string, KnowledgeRelation> relations, IDictionary<string, KnowledgeMention> mentions)
+    {
+        foreach (Match match in LabelledPersonRegex().Matches(text))
+        {
+            var name = match.Groups["name"].Value.Trim();
+            if (name.Length is < 2 or > 80) continue;
+            var person = AddEntity("person", name, name, entities);
+            AddMention(person, "labelled_person", "EXTRACTED", 1,
+                baseOffset + match.Groups["name"].Index,
+                baseOffset + match.Groups["name"].Index + match.Groups["name"].Length, input, mentions);
+            AddRelation(ownerEntity, person, "MENTIONS_PERSON", "EXTRACTED", 1, input.VersionId, relations);
+        }
+
+        foreach (Match match in DateRegex().Matches(text))
+        {
+            if (!TryNormalizeDate(match.Value, out var canonical)) continue;
+            var date = AddEntity("date", canonical, canonical, entities);
+            AddMention(date, "explicit_date", "EXTRACTED", 1, baseOffset + match.Index,
+                baseOffset + match.Index + match.Length, input, mentions);
+            AddRelation(ownerEntity, date, "MENTIONS_DATE", "EXTRACTED", 1, input.VersionId, relations);
+        }
+    }
+
+    private static bool TryNormalizeDate(string value, out string canonical)
+    {
+        var formats = new[] { "yyyy-MM-dd", "d/M/yyyy", "dd/MM/yyyy", "d-M-yyyy", "dd-MM-yyyy" };
+        if (DateOnly.TryParseExact(value, formats, CultureInfo.InvariantCulture,
+            DateTimeStyles.None, out var parsed))
+        {
+            canonical = parsed.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+            return true;
+        }
+        canonical = string.Empty;
+        return false;
+    }
+
     private static string AddEntity(string type, string stableKey, string label, IDictionary<string, KnowledgeEntity> entities)
     {
         var id = $"{type}:{Hash(type + "\0" + Normalize(stableKey))}";
@@ -328,6 +390,12 @@ internal static partial class DeterministicKnowledgeExtractor
 
     [GeneratedRegex(@"[\p{L}\p{N}]+", RegexOptions.CultureInvariant)]
     private static partial Regex WordRegex();
+
+    [GeneratedRegex(@"(?m)\b(?i:persona|person|autor(?:a)?|author|responsable|owner)\s*:\s*(?<name>[\p{Lu}][\p{L}\p{M}'’-]+(?:\s+[\p{Lu}][\p{L}\p{M}'’-]+){0,3})", RegexOptions.CultureInvariant)]
+    private static partial Regex LabelledPersonRegex();
+
+    [GeneratedRegex(@"\b(?:\d{4}-\d{2}-\d{2}|\d{1,2}[/-]\d{1,2}[/-]\d{4})\b", RegexOptions.CultureInvariant)]
+    private static partial Regex DateRegex();
 
     private sealed record VerifiedFile(string Path, string Sha256, long Size, string Tool, string Verification);
     private sealed record VerificationEvent(string Status, string Kind, string Scope, string CanonicalCommand);

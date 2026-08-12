@@ -1,5 +1,5 @@
 name: hypermemory
-version: 1.4.0
+version: 1.7.0
 description: "Automatic local recall and completed-turn capture through HyperMemory."
 hooks:
   - sync_turn

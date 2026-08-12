@@ -112,6 +112,26 @@ public sealed class ApiIntegrationTests
     }
 
     [Fact]
+    public async Task Core_memory_remains_healthy_when_knowledge_projection_is_disabled()
+    {
+        var storage = Path.Combine(Path.GetTempPath(), "HyperMemoryNoKnowledgeTests", Guid.NewGuid().ToString("N"));
+        await using var factory = CreateFactory(storage, 12000, enableKnowledgeProjection: false);
+        using var client = factory.CreateClient();
+        using var written = await client.PostAsJsonAsync("/memory/upsert", new MemoryWriteRequest(
+            "User request:\nrecuerda la clave modo-sin-grafo\n\nHermes response:\nQueda registrada.",
+            EventId: "no-knowledge-turn", Project: "hermes", Source: "hermes-auto"));
+        written.EnsureSuccessStatusCode();
+
+        await Task.Delay(1_200);
+        using var queried = await client.PostAsJsonAsync("/memory/query", new MemoryQuery("modo-sin-grafo", 5, "hermes"));
+        queried.EnsureSuccessStatusCode();
+        var hits = await queried.Content.ReadFromJsonAsync<MemoryHit[]>();
+        Assert.Contains(hits!, hit => hit.Atom.VersionId == "no-knowledge-turn");
+        Assert.True((await client.GetFromJsonAsync<IntegrityReport>("/memory/integrity"))!.IsValid);
+        Assert.Equal(1, (await client.GetFromJsonAsync<MemoryScaleStatus>("/memory/scale"))!.KnowledgePendingCount);
+    }
+
+    [Fact]
     public async Task External_graph_import_is_previewed_validated_idempotent_and_projected()
     {
         var storage = Path.Combine(Path.GetTempPath(), "HyperMemoryGraphImportApiTests", Guid.NewGuid().ToString("N"));
@@ -220,7 +240,8 @@ public sealed class ApiIntegrationTests
         Assert.True((await client.GetFromJsonAsync<IntegrityReport>("/memory/integrity"))!.IsValid);
     }
 
-    private static WebApplicationFactory<Program> CreateFactory(string storage, int summaryThreshold, string? authToken = null) =>
+    private static WebApplicationFactory<Program> CreateFactory(string storage, int summaryThreshold, string? authToken = null,
+        bool enableKnowledgeProjection = true) =>
         new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
             builder.ConfigureAppConfiguration((_, config) => config.AddInMemoryCollection(new Dictionary<string, string?>
             {
@@ -228,6 +249,7 @@ public sealed class ApiIntegrationTests
                 ["HyperMemory:OllamaEndpoint"] = "http://127.0.0.1:1",
                 ["HyperMemory:EnableBackgroundSummaries"] = "true",
                 ["HyperMemory:BackgroundSummaryThresholdCharacters"] = summaryThreshold.ToString(),
-                ["HyperMemory:AuthToken"] = authToken
+                ["HyperMemory:AuthToken"] = authToken,
+                ["HyperMemory:EnableKnowledgeProjection"] = enableKnowledgeProjection.ToString()
             })));
 }
