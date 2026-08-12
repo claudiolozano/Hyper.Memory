@@ -1,0 +1,82 @@
+name: Foundation bootstrap release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version without a leading v
+        required: true
+        default: 1.4.0
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - name: Check out reviewed source
+        uses: actions/checkout@v6
+
+      - name: Install .NET 10 SDK
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Install Python 3.11
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Test and evaluate
+        shell: pwsh
+        run: |
+          if ('${{ inputs.version }}' -ne '1.4.0') { throw 'Workflow version must match source version 1.4.0.' }
+          dotnet test HyperMemory.sln -c Release
+          python -m unittest discover -s tests -p '*_test.py' -v
+          dotnet run --project tests/HyperMemory.Evaluation -c Release --no-restore
+
+      - name: Build unsigned onboarding installer
+        shell: pwsh
+        run: |
+          ./scripts/Build-Installer.ps1 -Version '${{ inputs.version }}'
+          $installer = Get-ChildItem artifacts/installers -Recurse -Filter HyperMemorySetup.exe |
+            Sort-Object LastWriteTimeUtc -Descending |
+            Select-Object -First 1
+          if ($null -eq $installer) { throw 'Installer was not generated.' }
+          New-Item -ItemType Directory artifacts/foundation-bootstrap -Force | Out-Null
+          Copy-Item -LiteralPath $installer.FullName artifacts/foundation-bootstrap/HyperMemorySetup.exe
+          $hash = (Get-FileHash artifacts/foundation-bootstrap/HyperMemorySetup.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  HyperMemorySetup.exe" | Set-Content artifacts/foundation-bootstrap/SHA256SUMS.txt -Encoding ascii
+
+      - name: Publish initial release required for Foundation review
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          @'
+          ## HyperMemory 1.4.0 — SignPath Foundation onboarding build
+
+          This public Windows installer is the initial open-source release submitted for SignPath Foundation review.
+
+          **Authenticode status:** not signed. Windows may display a publisher warning. The signed installer will replace this onboarding build after Foundation approval.
+
+          Free code signing provided by SignPath.io, certificate by SignPath Foundation.
+
+          The installer and its SHA-256 checksum were built by GitHub Actions from the tagged public source after automated tests and retrieval-quality evaluation passed.
+          '@ | Set-Content artifacts/foundation-bootstrap/RELEASE-NOTES.md -Encoding utf8
+          gh release create "v${{ inputs.version }}" `
+            artifacts/foundation-bootstrap/HyperMemorySetup.exe `
+            artifacts/foundation-bootstrap/SHA256SUMS.txt `
+            --target $env:GITHUB_SHA `
+            --title "HyperMemory ${{ inputs.version }} (Foundation onboarding build)" `
+            --notes-file artifacts/foundation-bootstrap/RELEASE-NOTES.md
+
+      - name: Preserve workflow artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: HyperMemory-${{ inputs.version }}-foundation-bootstrap
+          path: artifacts/foundation-bootstrap/
+          if-no-files-found: error
+          retention-days: 30

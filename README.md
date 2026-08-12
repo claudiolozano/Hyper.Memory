@@ -4,6 +4,15 @@
 
 Free code signing provided by [SignPath.io](https://signpath.io), certificate by [SignPath Foundation](https://signpath.org).
 
+## Code signing policy
+
+Official Windows releases are built from the public HyperMemory repository by the reviewed GitHub Actions workflow and submitted to SignPath.io. The certificate is provided by SignPath Foundation; private signing keys are never held in this repository or by its maintainers.
+
+- Committer, reviewer and release approver: [Claudio Lozano](https://github.com/claudiolozano).
+- Privacy policy: [Privacy and retention](docs/PRIVACY-AND-RETENTION.md).
+- Network disclosure: HyperMemory stores memories locally and does not transfer information to other networked systems unless the user or the person operating it explicitly configures or requests such a connection. Its API is bound to the local loopback interface.
+- Release provenance: only artifacts produced from this repository by `.github/workflows/signpath-release.yml` are eligible for official signing.
+
 HyperMemory is a local, model-agnostic, append-only automatic memory service for Hermes Agent. Before every user turn, Hermes retrieves relevant history through the provider; after every completed turn, the conversation is stored without requiring the user to invoke a skill. It targets .NET 10 and opens directly in Visual Studio 2026 through `HyperMemory.sln`.
 
 “Infinite context” here means unbounded durable history plus bounded retrieval into the model context window. It does not claim that an LLM has an infinite token window.

@@ -15,7 +15,7 @@ Free code signing provided by [SignPath.io](https://signpath.io), certificate by
 
 ## Application
 
-After the public repository and an initial release exist, submit the application at [signpath.org](https://signpath.org/). Provide:
+After the public repository and an initial release exist, submit the application at [signpath.org](https://signpath.org/). The one-time **Foundation bootstrap release** workflow creates that explicitly unsigned onboarding release from tested public source. It must never be presented as Authenticode-signed. Provide:
 
 - public repository URL;
 - public download/release URL;
@@ -39,3 +39,5 @@ Configure these GitHub repository variables exactly as issued by SignPath:
 Configure `SIGNPATH_API_TOKEN` as an Actions secret. Never place it in source, workflow variables, build logs, issues, or releases.
 
 Create two artifact configurations in SignPath using `.signpath/runtime-artifacts.xml` and `.signpath/installer.xml`. Then run the **SignPath release** workflow manually with the release version.
+
+The workflow validates all six settings before restoring, testing, or compiling. Until SignPath Foundation approves the application and supplies these values, it stops immediately with an onboarding message and does not produce an artifact that could be mistaken for a signed release.
