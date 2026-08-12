@@ -1,0 +1,97 @@
+name: SignPath release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version without a leading v
+        required: true
+        default: 1.1.0
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  build-and-sign:
+    runs-on: windows-2025
+    timeout-minutes: 45
+    steps:
+      - name: Check out reviewed source
+        uses: actions/checkout@v6
+
+      - name: Install .NET 10 SDK
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Test
+        shell: pwsh
+        run: dotnet test HyperMemory.sln -c Release
+
+      - name: Build first-party runtime executables
+        shell: pwsh
+        run: ./scripts/Build-SignPathRuntime.ps1
+
+      - name: Upload unsigned runtime artifact
+        id: upload-runtime
+        uses: actions/upload-artifact@v7
+        with:
+          name: unsigned-runtime-${{ github.sha }}
+          path: artifacts/signpath-runtime/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Sign API and Bridge through SignPath Foundation
+        uses: signpath/github-action-submit-signing-request@v2
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          artifact-configuration-slug: ${{ vars.SIGNPATH_RUNTIME_CONFIGURATION_SLUG }}
+          github-artifact-id: ${{ steps.upload-runtime.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: artifacts/signed-runtime
+
+      - name: Build installer from signed runtime
+        shell: pwsh
+        run: ./scripts/Build-InstallerFromSignedRuntime.ps1 -SignedRuntimeDirectory artifacts/signed-runtime
+
+      - name: Upload unsigned installer artifact
+        id: upload-installer
+        uses: actions/upload-artifact@v7
+        with:
+          name: unsigned-installer-${{ github.sha }}
+          path: artifacts/signpath-installer/HyperMemorySetup.exe
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Sign installer through SignPath Foundation
+        uses: signpath/github-action-submit-signing-request@v2
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          artifact-configuration-slug: ${{ vars.SIGNPATH_INSTALLER_CONFIGURATION_SLUG }}
+          github-artifact-id: ${{ steps.upload-installer.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: artifacts/signed-installer
+
+      - name: Verify final Authenticode signature
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem artifacts/signed-installer -Recurse -Filter HyperMemorySetup.exe | Select-Object -First 1
+          if ($null -eq $installer) { throw "Signed installer was not returned." }
+          $signature = Get-AuthenticodeSignature -LiteralPath $installer.FullName
+          if ($signature.Status -ne "Valid") { throw "Invalid signature: $($signature.StatusMessage)" }
+          Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256 | Format-List
+
+      - name: Publish signed workflow artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: HyperMemory-${{ inputs.version }}-signed
+          path: artifacts/signed-installer/**/HyperMemorySetup.exe
+          if-no-files-found: error
+          retention-days: 30

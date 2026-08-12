@@ -1,0 +1,8 @@
+bin/
+obj/
+.vs/
+TestResults/
+artifacts/
+src/HyperMemory.Installer/payload.zip
+*.user
+*.suo
