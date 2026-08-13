@@ -240,8 +240,59 @@ public sealed class ApiIntegrationTests
         Assert.True((await client.GetFromJsonAsync<IntegrityReport>("/memory/integrity"))!.IsValid);
     }
 
+    [Fact]
+    public async Task Operational_routes_are_absent_when_features_are_disabled()
+    {
+        var storage = Path.Combine(Path.GetTempPath(), "HyperMemoryOperationalDisabledApiTests", Guid.NewGuid().ToString("N"));
+        await using var factory = CreateFactory(storage, 12000);
+        using var client = factory.CreateClient();
+
+        using var response = await client.PostAsJsonAsync("/memory/operational/events",
+            new OperationalEventWriteRequest("task.created", new OperationalObjectRef("task", "task-1"),
+                new OperationalScope("workspace-1"), "{}"));
+        Assert.Equal(System.Net.HttpStatusCode.NotFound, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Operational_api_captures_redacts_projects_and_routes_context()
+    {
+        var storage = Path.Combine(Path.GetTempPath(), "HyperMemoryOperationalApiTests", Guid.NewGuid().ToString("N"));
+        await using var factory = CreateFactory(storage, 12000, operational: true);
+        using var client = factory.CreateClient();
+        var scope = new OperationalScope("workspace-1", "project-1", "session-1", "agent-1", "task-1");
+        var task = new TaskStateChange("task-1", "Build game", "active",
+            Metadata: new Dictionary<string, string> { ["token"] = "sk-abcdefghijklmnop" });
+        using var written = await client.PostAsJsonAsync("/memory/operational/events",
+            new OperationalEventWriteRequest("task.created", new OperationalObjectRef("task", "task-1"),
+                scope, JsonSerializer.Serialize(task), EventId: "operational-api-event"));
+        written.EnsureSuccessStatusCode();
+        var artifactObservation = new ArtifactObservationRequest(scope, new ArtifactStateChange(
+            "artifact-1", "src/game.cs", "workspace-file", "ABC", "ABC", true,
+            ObservationId: "observation-1", ObservedAt: DateTimeOffset.Parse("2026-08-13T12:00:00Z")));
+        using var observed = await client.PostAsJsonAsync("/memory/operational/artifacts/observe", artifactObservation);
+        observed.EnsureSuccessStatusCode();
+        using var retried = await client.PostAsJsonAsync("/memory/operational/artifacts/observe", artifactObservation);
+        retried.EnsureSuccessStatusCode();
+
+        using var stateResponse = await client.PostAsJsonAsync("/memory/operational/project", scope);
+        stateResponse.EnsureSuccessStatusCode();
+        var state = await stateResponse.Content.ReadFromJsonAsync<ProjectStateSnapshot>();
+        Assert.NotNull(state);
+        Assert.Equal("task-1", state.Tasks.Single().TaskId);
+        Assert.Equal("artifact-1", state.Artifacts.Single().ArtifactId);
+        Assert.Equal("[REDACTED]", state.Tasks.Single().Metadata!["token"]);
+
+        using var contextResponse = await client.PostAsJsonAsync("/memory/operational/context",
+            new MemoryContextRequest(scope, "build game", 1_000));
+        contextResponse.EnsureSuccessStatusCode();
+        var context = await contextResponse.Content.ReadFromJsonAsync<MemoryContextSlice>();
+        Assert.NotNull(context);
+        Assert.Contains("Build game", context.Context);
+        Assert.True(context.CharacterCount <= 1_000);
+    }
+
     private static WebApplicationFactory<Program> CreateFactory(string storage, int summaryThreshold, string? authToken = null,
-        bool enableKnowledgeProjection = true) =>
+        bool enableKnowledgeProjection = true, bool operational = false) =>
         new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
             builder.ConfigureAppConfiguration((_, config) => config.AddInMemoryCollection(new Dictionary<string, string?>
             {
@@ -250,6 +301,18 @@ public sealed class ApiIntegrationTests
                 ["HyperMemory:EnableBackgroundSummaries"] = "true",
                 ["HyperMemory:BackgroundSummaryThresholdCharacters"] = summaryThreshold.ToString(),
                 ["HyperMemory:AuthToken"] = authToken,
-                ["HyperMemory:EnableKnowledgeProjection"] = enableKnowledgeProjection.ToString()
+                ["HyperMemory:EnableKnowledgeProjection"] = enableKnowledgeProjection.ToString(),
+                ["HyperMemory:Operational:EnableEventJournal"] = operational.ToString(),
+                ["HyperMemory:Operational:EnableProjectState"] = operational.ToString(),
+                ["HyperMemory:Operational:EnableValidationMemory"] = operational.ToString(),
+                ["HyperMemory:Operational:EnableErrorMemory"] = operational.ToString(),
+                ["HyperMemory:Operational:EnableDecisionMemory"] = operational.ToString(),
+                ["HyperMemory:Operational:EnableTaskGraph"] = operational.ToString(),
+                ["HyperMemory:Operational:EnableCheckpoints"] = operational.ToString(),
+                ["HyperMemory:Operational:EnableContracts"] = operational.ToString(),
+                ["HyperMemory:Operational:EnableWorkingMemory"] = operational.ToString(),
+                ["HyperMemory:Operational:EnableSelectiveMemoryRouter"] = operational.ToString(),
+                ["HyperMemory:Operational:EnableCapabilityRouting"] = operational.ToString(),
+                ["HyperMemory:Operational:EnableToolEventCapture"] = operational.ToString()
             })));
 }

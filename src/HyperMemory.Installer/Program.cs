@@ -11,7 +11,7 @@ namespace HyperMemory.Installer;
 
 internal static class Program
 {
-    private const string ProductVersion = "1.7.0";
+    private const string ProductVersion = "2.0.0";
     private const string MemoryProviderName = "hypermemory";
     private const string RunKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
     private const string UninstallKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\HyperMemory";
@@ -119,7 +119,7 @@ internal static class Program
             var pluginMarkerPath = Path.Combine(pluginPath, ".hypermemory-owned.json");
             WriteNewJson(pluginMarkerPath, new OwnershipMarker(installId, root, ProductVersion));
             var pluginConnectionPath = Path.Combine(pluginPath, "connection.json");
-            WriteNewJson(pluginConnectionPath, new PluginConnection("http://127.0.0.1:5077", authToken, true, true, true));
+            WriteNewJson(pluginConnectionPath, new PluginConnection("http://127.0.0.1:5077", authToken, true, true, true, true));
             RestrictFileToCurrentUser(pluginConnectionPath);
             SetHermesConfigValue(hermesBase, "memory.provider", MemoryProviderName);
             configurationChanged = true;
@@ -917,7 +917,7 @@ internal static class Program
         string? AuthTokenPath = null, string? SupervisorPidPath = null, string? ActiveInstallationPath = null);
     internal sealed record OwnershipMarker(string InstallId, string StorageRoot, string Version);
     internal sealed record PluginConnection(string Endpoint, string Token, bool RedactSecrets,
-        bool CaptureEnabled, bool UserOptOutEnabled);
+        bool CaptureEnabled, bool UserOptOutEnabled, bool OperationalEnabled);
     internal sealed record ActiveInstallation(string InstallId, string ManifestPath, string Version, string Status = "active");
     internal sealed record SupervisorState(int ProcessId, string InstallId, string Executable);
     internal sealed record BackupFile(string RelativePath, long Length, string Sha256);

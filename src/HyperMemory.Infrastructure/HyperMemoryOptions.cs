@@ -16,6 +16,31 @@ public sealed class HyperMemoryOptions
     public int ScaleMaintenanceIntervalMinutes { get; set; } = 360;
     public int ExternalGraphImportMaxNodes { get; set; } = 100_000;
     public int ExternalGraphImportMaxEdges { get; set; } = 250_000;
+    public OperationalMemoryFeatureOptions Operational { get; set; } = new();
+}
+
+public sealed class OperationalMemoryFeatureOptions
+{
+    public bool EnableEventJournal { get; set; }
+    public bool EnableProjectState { get; set; }
+    public bool EnableValidationMemory { get; set; }
+    public bool EnableErrorMemory { get; set; }
+    public bool EnableDecisionMemory { get; set; }
+    public bool EnableTaskGraph { get; set; }
+    public bool EnableContracts { get; set; }
+    public bool EnableCheckpoints { get; set; }
+    public bool EnableSelectiveMemoryRouter { get; set; }
+    public bool EnableCapabilityRouting { get; set; }
+    public bool EnableToolEventCapture { get; set; }
+    public bool EnableWorkingMemory { get; set; }
+    public int MaxRepairAttempts { get; set; } = 3;
+    public int WorkingMemoryDefaultTtlMinutes { get; set; } = 1_440;
+    public int WorkingMemoryMaxItems { get; set; } = 200;
+
+    public bool AnyEnabled => EnableEventJournal || EnableProjectState || EnableValidationMemory ||
+        EnableErrorMemory || EnableDecisionMemory || EnableTaskGraph || EnableContracts ||
+        EnableCheckpoints || EnableSelectiveMemoryRouter || EnableCapabilityRouting ||
+        EnableToolEventCapture || EnableWorkingMemory;
 }
 
 public sealed record StorageLayout(string Root, string DatabasePath)

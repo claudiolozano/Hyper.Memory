@@ -11,7 +11,7 @@ using Microsoft.Extensions.Options;
 namespace HyperMemory.Infrastructure;
 
 public sealed partial class SqliteMemoryStore : IMemoryStore, IKnowledgeProjectionStore, IScaleMaintenanceStore,
-    IOperationalDiagnosticsStore, IAsyncDisposable
+    IOperationalDiagnosticsStore, IOperationalEventStore, IAsyncDisposable
 {
     private const string TurnSeparator = "\n\nHermes response:\n";
     private static readonly HashSet<string> SearchStopWords = new(StringComparer.OrdinalIgnoreCase)
@@ -25,25 +25,49 @@ public sealed partial class SqliteMemoryStore : IMemoryStore, IKnowledgeProjecti
     };
     private readonly StorageLayout layout;
     private readonly int _recentSemanticCandidateLimit;
+    private readonly bool _enableOperationalEventJournal;
+    private readonly bool _enableProjectState;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly string _connectionString;
 
-    public SqliteMemoryStore(StorageLayout layout) : this(layout, 2_000) { }
+    public SqliteMemoryStore(StorageLayout layout) : this(layout, 2_000, new OperationalMemoryFeatureOptions()) { }
 
     public SqliteMemoryStore(StorageLayout layout, IOptions<HyperMemoryOptions> options)
-        : this(layout, options.Value.RecentSemanticCandidateLimit) { }
+        : this(layout, options.Value.RecentSemanticCandidateLimit, options.Value.Operational) { }
 
-    private SqliteMemoryStore(StorageLayout layout, int recentSemanticCandidateLimit)
+    private SqliteMemoryStore(StorageLayout layout, int recentSemanticCandidateLimit, OperationalMemoryFeatureOptions operational)
     {
+        if (operational.EnableProjectState && !operational.EnableEventJournal)
+            throw new InvalidOperationException("Project state requires the operational event journal.");
+        if (operational.EnableValidationMemory && !operational.EnableEventJournal)
+            throw new InvalidOperationException("Validation memory requires the operational event journal.");
+        if ((operational.EnableErrorMemory || operational.EnableDecisionMemory) &&
+            (!operational.EnableEventJournal || !operational.EnableProjectState))
+            throw new InvalidOperationException("Error and decision memory require the event journal and project state.");
+        if (operational.EnableContracts &&
+            (!operational.EnableEventJournal || !operational.EnableProjectState || !operational.EnableValidationMemory))
+            throw new InvalidOperationException("Contracts require the event journal, project state, and validation memory.");
+        if ((operational.EnableCheckpoints || operational.EnableTaskGraph) &&
+            (!operational.EnableEventJournal || !operational.EnableProjectState || !operational.EnableValidationMemory))
+            throw new InvalidOperationException("Checkpoints and task evaluation require the event journal, project state, and validation memory.");
+        if (operational.EnableSelectiveMemoryRouter &&
+            (!operational.EnableEventJournal || !operational.EnableProjectState))
+            throw new InvalidOperationException("Selective memory routing requires the event journal and project state.");
+        if (operational.EnableWorkingMemory &&
+            (!operational.EnableEventJournal || !operational.EnableProjectState))
+            throw new InvalidOperationException("Working memory requires the event journal and project state.");
         this.layout = layout;
         _recentSemanticCandidateLimit = Math.Clamp(recentSemanticCandidateLimit, 100, 100_000);
+        _enableOperationalEventJournal = operational.EnableEventJournal;
+        _enableProjectState = operational.EnableProjectState;
         _connectionString = new SqliteConnectionStringBuilder
         {
             DataSource = layout.DatabasePath,
             Mode = SqliteOpenMode.ReadWriteCreate,
             Cache = SqliteCacheMode.Shared,
             ForeignKeys = true,
-            Pooling = true
+            Pooling = true,
+            DefaultTimeout = 5
         }.ToString();
     }
 
@@ -66,8 +90,7 @@ public sealed partial class SqliteMemoryStore : IMemoryStore, IKnowledgeProjecti
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
                 );
-                INSERT INTO memory_schema(key,value) VALUES('version','4')
-                    ON CONFLICT(key) DO UPDATE SET value=excluded.value;
+                INSERT OR IGNORE INTO memory_schema(key,value) VALUES('version','4');
                 CREATE TABLE IF NOT EXISTS memory_atoms (
                     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
                     version_id TEXT NOT NULL UNIQUE,
@@ -177,6 +200,8 @@ public sealed partial class SqliteMemoryStore : IMemoryStore, IKnowledgeProjecti
                 INSERT OR IGNORE INTO memory_evidence(version_id)
                     SELECT version_id FROM memory_atoms;
                 """, cancellationToken);
+            if (_enableOperationalEventJournal)
+                await ApplyOperationalMigrationsAsync(connection, _enableProjectState, cancellationToken);
             await BackfillTurnIndexBatchAsync(connection, 500, cancellationToken);
         }
         finally { _gate.Release(); }

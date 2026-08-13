@@ -9,7 +9,7 @@ import os
 import re
 import unicodedata
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -50,6 +50,7 @@ class HyperMemoryProvider(MemoryProvider):
         self._redact_secrets = True
         self._capture_enabled = True
         self._user_opt_out_enabled = True
+        self._operational_enabled = False
 
     @property
     def name(self) -> str:
@@ -74,6 +75,7 @@ class HyperMemoryProvider(MemoryProvider):
             self._redact_secrets = bool(connection.get("redactSecrets", connection.get("RedactSecrets", True)))
             self._capture_enabled = bool(connection.get("captureEnabled", connection.get("CaptureEnabled", True)))
             self._user_opt_out_enabled = bool(connection.get("userOptOutEnabled", connection.get("UserOptOutEnabled", True)))
+            self._operational_enabled = bool(connection.get("operationalEnabled", connection.get("OperationalEnabled", False)))
         except (OSError, json.JSONDecodeError, AttributeError):
             pass
 
@@ -94,12 +96,18 @@ class HyperMemoryProvider(MemoryProvider):
             "user asks to repeat or recover prior work, prefer the earliest substantive "
             "original turn over later summaries. Never claim that something is absent when "
             "a matching original request or artifact is present. "
+            "CAPABILITY RULE: When the task requires an installed Hermes skill or tool, "
+            "select and activate it automatically through Hermes' native mechanism. Never "
+            "require the user to know its name. Missing capability or authorization must be "
+            "reported, never simulated. "
             "Never ask the user to invoke or manage HyperMemory manually."
         )
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         if not (query or "").strip():
             return ""
+        active_session = session_id or self._session_id or "unknown"
+        operational_context = self._prefetch_operational(query, active_session)
         payload = {
             "text": query,
             "limit": 30,
@@ -109,10 +117,9 @@ class HyperMemoryProvider(MemoryProvider):
         }
         hits = self._request_json("/memory/query", payload)
         if not isinstance(hits, list) or not hits:
-            self._last_recall_ids[session_id or self._session_id or "unknown"] = []
-            return ""
+            self._last_recall_ids[active_session] = []
+            return operational_context
 
-        active_session = session_id or self._session_id or "unknown"
         probe_topics = sorted(self._tokens(query) - _GENERIC_HISTORY_WORDS)
         if self._is_history_query(query) and probe_topics:
             expanded_payload = dict(payload)
@@ -247,7 +254,28 @@ class HyperMemoryProvider(MemoryProvider):
             total_chars += len(line)
             included_ids.append(version_id)
         self._last_recall_ids[active_session] = included_ids
-        return "\n".join(lines) if len(lines) > 1 else ""
+        historical_context = "\n".join(lines) if len(lines) > 1 else ""
+        return "\n\n".join(part for part in (operational_context, historical_context) if part)
+
+    def _prefetch_operational(self, query: str, active_session: str) -> str:
+        if not self._operational_enabled:
+            return ""
+        result = self._request_json("/memory/operational/context", {
+            "scope": {
+                "workspaceId": self._workspace or "hermes-global",
+                "projectId": self._project,
+                "sessionId": active_session,
+                "agentId": "hermes-primary",
+                "taskId": None,
+            },
+            "intent": query,
+            "characterBudget": 5_000,
+            "preferredObjectTypes": None,
+            "includeHistorical": False,
+        })
+        if not isinstance(result, dict):
+            return ""
+        return str(result.get("context") or "").strip()[:5_000]
 
     @staticmethod
     def _stored_verified_files(atom: Dict[str, Any]) -> List[Dict[str, str]]:
@@ -526,7 +554,143 @@ class HyperMemoryProvider(MemoryProvider):
             "metadata": metadata,
         }
         self._queue_write(logical_id, payload)
+        if self._operational_enabled:
+            self._queue_operational_observations(
+                fingerprint, active_session, now, stored_user, verified_artifacts, execution_events
+            )
         self._flush_outbox()
+
+    def _queue_operational_observations(
+        self,
+        turn_fingerprint: str,
+        active_session: str,
+        occurred_at: str,
+        user_request: str,
+        verified_artifacts: List[Dict[str, Any]],
+        execution_events: List[Dict[str, Any]],
+    ) -> None:
+        scope = {
+            "workspaceId": self._workspace or "hermes-global",
+            "projectId": self._project,
+            "sessionId": active_session,
+            "agentId": "hermes-primary",
+            "taskId": None,
+        }
+        working_event_id = f"hermes-working-{turn_fingerprint}"
+        expires_at = (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat().replace("+00:00", "Z")
+        self._queue_operational(working_event_id, {
+            "eventType": "working.upserted",
+            "subject": {"objectType": "working-memory", "objectId": "current-request"},
+            "scope": scope,
+            "dataJson": json.dumps({
+                "key": "current-request",
+                "itemType": "current-request",
+                "valueJson": json.dumps({"request": user_request}, ensure_ascii=False, sort_keys=True),
+                "priority": 100,
+                "expiresAt": expires_at,
+                "metadata": {"source": "hermes-sync-turn"},
+            }, ensure_ascii=False, sort_keys=True),
+            "eventId": working_event_id,
+            "correlationId": turn_fingerprint,
+            "occurredAt": occurred_at,
+        })
+        for index, artifact in enumerate(verified_artifacts):
+            artifact_id = str(artifact.get("path") or "")
+            if not artifact_id:
+                continue
+            event_id = f"hermes-artifact-{turn_fingerprint}-{index}"
+            self._queue_operational(event_id, {
+                "scope": scope,
+                "artifact": {
+                    "artifactId": artifact_id,
+                    "uri": artifact_id,
+                    "artifactType": "workspace-file",
+                    "contentHash": artifact.get("sha256"),
+                    "revision": artifact.get("sha256"),
+                    "isSourceOfTruth": True,
+                    "metadata": {"tool": str(artifact.get("tool") or "hermes")},
+                    "observationId": event_id,
+                    "observedAt": occurred_at,
+                },
+            }, route="/memory/operational/artifacts/observe")
+        for index, execution in enumerate(execution_events):
+            evidence_id = f"execution-{turn_fingerprint}-{index}"
+            evidence_event_id = f"hermes-evidence-{turn_fingerprint}-{index}"
+            evidence = {
+                "evidenceId": evidence_id,
+                "evidenceType": "command-execution",
+                "sourceEventId": evidence_event_id,
+                "sourceUri": None,
+                "contentHash": execution.get("outputSha256"),
+                "producer": "hermes-terminal",
+                "capturedAt": occurred_at,
+                "dataJson": json.dumps(execution, ensure_ascii=False, sort_keys=True),
+                "metadata": None,
+            }
+            self._queue_operational(evidence_event_id, {
+                "eventType": "evidence.recorded",
+                "subject": {"objectType": "evidence", "objectId": evidence_id},
+                "scope": scope,
+                "dataJson": json.dumps(evidence, ensure_ascii=False, sort_keys=True),
+                "eventId": evidence_event_id,
+                "correlationId": turn_fingerprint,
+                "occurredAt": occurred_at,
+                "expectedRevision": 0,
+            })
+            verification = execution.get("verification")
+            if isinstance(verification, dict) and verification.get("status") in {"passed", "failed"}:
+                validation_id = f"validation-{turn_fingerprint}-{index}"
+                validation_event_id = f"hermes-validation-{turn_fingerprint}-{index}"
+                validation = {
+                    "validationId": validation_id,
+                    "subject": {"objectType": "session", "objectId": active_session},
+                    "validatorId": "hermes-terminal-verification",
+                    "status": 1 if verification.get("status") == "passed" else 2,
+                    "scopeJson": json.dumps({
+                        "kind": verification.get("kind"),
+                        "scope": verification.get("scope"),
+                        "command": verification.get("canonicalCommand"),
+                    }, ensure_ascii=False, sort_keys=True),
+                    "evidenceIds": [evidence_id],
+                    "staleAt": None,
+                    "explanation": "Observed Hermes terminal verification.",
+                }
+                self._queue_operational(validation_event_id, {
+                    "eventType": "validation.recorded",
+                    "subject": {"objectType": "validation", "objectId": validation_id},
+                    "scope": scope,
+                    "dataJson": json.dumps(validation, ensure_ascii=False, sort_keys=True),
+                    "eventId": validation_event_id,
+                    "correlationId": turn_fingerprint,
+                    "occurredAt": occurred_at,
+                    "expectedRevision": 0,
+                })
+            if execution.get("status") == "failed":
+                error_id = "error-" + hashlib.sha256(
+                    str(execution.get("command") or "").encode("utf-8", errors="replace")
+                ).hexdigest()[:24]
+                error_event_id = f"hermes-error-{turn_fingerprint}-{index}"
+                error = {
+                    "errorId": error_id,
+                    "errorType": "command-execution",
+                    "message": "Hermes terminal command failed.",
+                    "fingerprint": error_id,
+                    "status": "open",
+                    "artifactIds": [],
+                    "evidenceIds": [evidence_id],
+                    "repairAttempts": 0,
+                    "maxRepairAttempts": 3,
+                    "metadata": None,
+                }
+                self._queue_operational(error_event_id, {
+                    "eventType": "error.observed",
+                    "subject": {"objectType": "error", "objectId": error_id},
+                    "scope": scope,
+                    "dataJson": json.dumps(error, ensure_ascii=False, sort_keys=True),
+                    "eventId": error_event_id,
+                    "correlationId": turn_fingerprint,
+                    "occurredAt": occurred_at,
+                })
 
     def _verified_artifacts(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Hash successful file-tool outputs, restricted to the active workspace."""
@@ -732,6 +896,24 @@ class HyperMemoryProvider(MemoryProvider):
         **kwargs: Any,
     ) -> None:
         del parent_session_id, reset, rewound, kwargs
+        if self._operational_enabled and self._session_id and self._session_id != "unknown":
+            now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            checkpoint_id = "hermes-checkpoint-" + hashlib.sha256(
+                f"{self._workspace}\0{self._project}\0{self._session_id}\0{now}".encode("utf-8", errors="replace")
+            ).hexdigest()
+            self._queue_operational(checkpoint_id, {
+                "scope": {
+                    "workspaceId": self._workspace or "hermes-global",
+                    "projectId": self._project,
+                    "sessionId": self._session_id,
+                    "agentId": "hermes-primary",
+                    "taskId": None,
+                },
+                "label": "Automatic checkpoint before Hermes session switch",
+                "evidenceIds": [],
+                "checkpointId": checkpoint_id,
+            }, route="/memory/operational/checkpoints")
+            self._flush_outbox()
         self._session_id = new_session_id or "unknown"
 
     def _request_json(self, route: str, payload: Dict[str, Any]) -> Any:
@@ -832,6 +1014,35 @@ class HyperMemoryProvider(MemoryProvider):
             except OSError:
                 pass
 
+    def _queue_operational(
+        self,
+        event_id: str,
+        payload: Dict[str, Any],
+        *,
+        route: str = "/memory/operational/events",
+    ) -> None:
+        if self._outbox_dir is None:
+            return
+        self._outbox_dir.mkdir(parents=True, exist_ok=True)
+        safe_id = hashlib.sha256(event_id.encode("utf-8", errors="replace")).hexdigest()
+        destination = self._outbox_dir / f"operational-{safe_id}.json"
+        if destination.exists():
+            return
+        temporary = self._outbox_dir / f".operational-{safe_id}.{os.getpid()}.tmp"
+        envelope = {"route": route, "payload": payload}
+        encoded = json.dumps(envelope, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        try:
+            with temporary.open("xb") as stream:
+                stream.write(encoded)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, destination)
+        finally:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+
     def _flush_outbox(self, maximum: int = 20) -> None:
         if self._outbox_dir is None or not self._outbox_dir.exists():
             return
@@ -843,6 +1054,24 @@ class HyperMemoryProvider(MemoryProvider):
                 path.unlink()
             except (OSError, json.JSONDecodeError) as error:
                 logger.warning("HyperMemory outbox item failed for %s: %s", path, error)
+                return
+        for path in sorted(self._outbox_dir.glob("operational-*.json"))[:maximum]:
+            try:
+                envelope = json.loads(path.read_text(encoding="utf-8"))
+                route = str(envelope.get("route") or "")
+                payload = envelope.get("payload")
+                if route not in {
+                    "/memory/operational/events",
+                    "/memory/operational/artifacts/observe",
+                    "/memory/operational/checkpoints",
+                } or not isinstance(payload, dict):
+                    logger.warning("Invalid HyperMemory operational outbox item: %s", path)
+                    return
+                if self._request_json(route, payload) is None:
+                    return
+                path.unlink()
+            except (OSError, json.JSONDecodeError) as error:
+                logger.warning("HyperMemory operational outbox item failed for %s: %s", path, error)
                 return
 
 

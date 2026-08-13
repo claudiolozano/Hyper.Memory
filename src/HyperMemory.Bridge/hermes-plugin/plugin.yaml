@@ -1,6 +1,6 @@
 name: hypermemory
-version: 1.7.0
-description: "Automatic local recall and completed-turn capture through HyperMemory."
+version: 2.0.0
+description: "Automatic local historical and operational memory for Hermes."
 hooks:
   - sync_turn
   - prefetch

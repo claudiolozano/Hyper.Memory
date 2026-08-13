@@ -153,6 +153,68 @@ class HyperMemoryProviderTests(unittest.TestCase):
         self.assertEqual("installer-token", provider._auth_token)
         self.assertFalse(provider._redact_secrets)
 
+    def test_operational_context_is_automatic_and_keeps_legacy_recall(self):
+        provider = module.HyperMemoryProvider()
+        with tempfile.TemporaryDirectory() as home:
+            connection = Path(home) / "plugins" / "hypermemory" / "connection.json"
+            connection.parent.mkdir(parents=True)
+            connection.write_text(json.dumps({"OperationalEnabled": True}), encoding="utf-8")
+            provider.initialize("session", hermes_home=home, agent_workspace="workspace")
+
+            def request(route, payload):
+                if route == "/memory/operational/context":
+                    self.assertEqual("session", payload["scope"]["sessionId"])
+                    return {"context": "OPERATIONAL STATE: task active"}
+                return [self._hit("legacy", "remember this", "legacy answer", 0.9)]
+
+            provider._request_json = request
+            recalled = provider.prefetch("remember")
+        self.assertIn("OPERATIONAL STATE", recalled)
+        self.assertIn("ORIGINAL_USER_REQUEST", recalled)
+
+    def test_operational_observations_use_durable_outbox_and_retry(self):
+        provider = module.HyperMemoryProvider()
+        with tempfile.TemporaryDirectory() as home:
+            provider.initialize("session", hermes_home=home, agent_workspace="workspace")
+            provider._operational_enabled = True
+            provider._queue_operational_observations(
+                "fingerprint", "session", "2026-08-13T12:00:00Z",
+                "build the game",
+                [{"path": "src/game.py", "sha256": "A" * 64, "tool": "write_file"}],
+                [{
+                    "command": "pytest", "exitCode": 0, "status": "succeeded", "workdir": ".",
+                    "outputSha256": "B" * 64,
+                    "verification": {"status": "passed", "kind": "test", "scope": "targeted", "canonicalCommand": "pytest"},
+                }],
+            )
+            queued = list(provider._outbox_dir.glob("operational-*.json"))
+            self.assertEqual(4, len(queued))
+            provider._request_json = lambda *_: None
+            provider._flush_outbox()
+            self.assertEqual(4, len(list(provider._outbox_dir.glob("operational-*.json"))))
+            sent = []
+            provider._request_json = lambda route, payload: sent.append((route, payload)) or {"created": True}
+            provider._flush_outbox()
+            self.assertEqual(4, len(sent))
+            self.assertFalse(list(provider._outbox_dir.glob("operational-*.json")))
+            self.assertEqual(1, sum(route == "/memory/operational/artifacts/observe" for route, _ in sent))
+            self.assertEqual(3, sum(route == "/memory/operational/events" for route, _ in sent))
+
+    def test_session_switch_requests_automatic_checkpoint_when_operational(self):
+        provider = module.HyperMemoryProvider()
+        with tempfile.TemporaryDirectory() as home:
+            provider.initialize("old-session", hermes_home=home, agent_workspace="workspace")
+            provider._operational_enabled = True
+            calls = []
+            provider._request_json = lambda route, payload: calls.append((route, payload)) or {"checkpointId": "checkpoint"}
+
+            provider.on_session_switch("new-session")
+
+            self.assertEqual("new-session", provider._session_id)
+            self.assertEqual("/memory/operational/checkpoints", calls[0][0])
+            self.assertEqual("old-session", calls[0][1]["scope"]["sessionId"])
+            self.assertFalse(list(provider._outbox_dir.glob("operational-*.json")))
+
     def test_large_top_hit_is_truncated_instead_of_disappearing(self):
         provider = module.HyperMemoryProvider()
         with tempfile.TemporaryDirectory() as home:
