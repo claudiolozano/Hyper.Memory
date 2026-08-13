@@ -13,7 +13,7 @@ Official Windows releases are built from the public HyperMemory repository by th
 - Network disclosure: HyperMemory stores memories locally and does not transfer information to other networked systems unless the user or the person operating it explicitly configures or requests such a connection. Its API is bound to the local loopback interface.
 - Release provenance: only artifacts produced from this repository by `.github/workflows/signpath-release.yml` are eligible for official signing.
 
-HyperMemory is a local, model-agnostic, append-only automatic memory service for Hermes Agent. Before every user turn, Hermes retrieves relevant history through the provider; after every completed turn, the conversation is stored without requiring the user to invoke a skill. It targets .NET 10 and opens directly in Visual Studio 2026 through `HyperMemory.sln`.
+HyperMemory is a local, model-agnostic, append-only automatic memory service for Hermes Agent. Version 2.0 keeps the original historical memory and adds bounded working memory, rebuildable project state, artifacts and relationships, decisions, deduplicated errors, validation evidence, checkpoints and evidence-based completion. Before every user turn, Hermes retrieves relevant state and history; after every completed turn, the conversation and verified tool observations are stored without requiring the user to invoke a skill. It targets .NET 10 and opens directly in Visual Studio 2026 through `HyperMemory.sln`.
 
 “Infinite context” here means unbounded durable history plus bounded retrieval into the model context window. It does not claim that an LLM has an infinite token window.
 
@@ -142,6 +142,16 @@ The default listener is `http://127.0.0.1:5077` and is intentionally not exposed
 - `GET /memory/scale`: database/WAL size, index coverage, projection backlog, semantic-window coverage and ANN evaluation signal.
 - `POST /memory/maintenance`: non-destructive SQLite statistics optimization and passive WAL checkpoint.
 - `GET /memory/diagnostics`: one operational view of capture counts, turn-index backlog, graph backlog/failures, last stored memory and database/WAL growth.
+- `POST /memory/operational/context`: build a bounded, priority-ordered operational context slice.
+- `POST /memory/operational/project`: recover the current rebuildable project state.
+- `POST /memory/operational/events`: append an idempotent, scoped operational event.
+- `POST /memory/operational/artifacts/observe`: observe an artifact change/deletion and invalidate affected validation evidence.
+- `POST /memory/operational/working/upsert`: update expiring short-term working state.
+- `POST /memory/operational/statements`: record a goal, requirement, constraint or preference with provenance.
+- `POST /memory/operational/checkpoints`: create a tamper-evident logical checkpoint.
+- `POST /memory/operational/completion`: return `VERIFIED_COMPLETE`, `UNVERIFIED_COMPLETE`, `INCOMPLETE` or `BLOCKED` semantics without granting execution authority.
+
+Architecture, feature flags, migrations, rollback, adapter extension and troubleshooting are documented in [Operational memory](docs/OPERATIONAL-MEMORY.md).
 
 The installed Hermes provider authenticates all `/memory/*` requests with a random per-installation token kept in the user's protected application directory. The service stays bound to loopback and the supervisor restarts it automatically after an unexpected exit.
 

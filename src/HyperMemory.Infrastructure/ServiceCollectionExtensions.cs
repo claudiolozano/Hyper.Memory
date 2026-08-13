@@ -16,6 +16,27 @@ public static class ServiceCollectionExtensions
         services.AddSingleton<IKnowledgeProjectionStore>(sp => sp.GetRequiredService<SqliteMemoryStore>());
         services.AddSingleton<IScaleMaintenanceStore>(sp => sp.GetRequiredService<SqliteMemoryStore>());
         services.AddSingleton<IOperationalDiagnosticsStore>(sp => sp.GetRequiredService<SqliteMemoryStore>());
+        // These registrations are inert until a feature-gated endpoint resolves them. SQLite
+        // migrations and all operational behavior remain controlled by HyperMemoryOptions.
+        services.AddSingleton<IOperationalEventStore>(sp => sp.GetRequiredService<SqliteMemoryStore>());
+        services.AddSingleton<IProjectStateProjectionStore, SqliteProjectStateProjectionStore>();
+        services.AddSingleton<IValidationMemoryService, ValidationMemoryService>();
+        services.AddSingleton<IErrorDecisionMemoryService>(sp => new ErrorDecisionMemoryService(
+            sp.GetRequiredService<IOperationalEventStore>(),
+            sp.GetRequiredService<IProjectStateProjectionStore>(),
+            sp.GetRequiredService<IOptions<HyperMemoryOptions>>().Value.Operational.MaxRepairAttempts));
+        services.AddSingleton<IContractInvalidationService, ContractInvalidationService>();
+        services.AddSingleton<ICheckpointService, CheckpointService>();
+        services.AddSingleton<ICompletionEvaluator, CompletionEvaluator>();
+        services.AddSingleton<ICapabilityRegistry, CapabilityRegistry>();
+        services.AddSingleton<ICapabilityRouter, CapabilityRouter>();
+        services.AddSingleton<IOperationalMemoryRouter, OperationalMemoryRouter>();
+        services.AddSingleton<IWorkingProjectMemoryService>(sp => new WorkingProjectMemoryService(
+            sp.GetRequiredService<IOperationalEventStore>(),
+            sp.GetRequiredService<IProjectStateProjectionStore>(),
+            sp.GetServices<IValidationMemoryService>(),
+            sp.GetRequiredService<IOptions<HyperMemoryOptions>>().Value.Operational.WorkingMemoryDefaultTtlMinutes,
+            sp.GetRequiredService<IOptions<HyperMemoryOptions>>().Value.Operational.WorkingMemoryMaxItems));
         services.AddHttpClient("ollama", (sp, client) =>
         {
             var endpoint = sp.GetRequiredService<IOptions<HyperMemoryOptions>>().Value.OllamaEndpoint;

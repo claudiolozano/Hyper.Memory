@@ -6,7 +6,7 @@ on:
       version:
         description: Release version without a leading v
         required: true
-        default: 1.4.0
+        default: 2.0.0
 
 permissions:
   contents: read
@@ -56,7 +56,7 @@ jobs:
       - name: Test
         shell: pwsh
         run: |
-          if ('${{ inputs.version }}' -ne '1.4.0') { throw 'Workflow version must match source version 1.4.0.' }
+          if ('${{ inputs.version }}' -ne '2.0.0') { throw 'Workflow version must match source version 2.0.0.' }
           dotnet test HyperMemory.sln -c Release
           python -m unittest discover -s tests -p '*_test.py' -v
 

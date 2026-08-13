@@ -1,6 +1,6 @@
 param(
     [string]$Runtime = "win-x64",
-    [string]$Version = "1.7.0",
+    [string]$Version = "2.0.0",
     [string]$CertificateThumbprint = "",
     [ValidateSet("CurrentUser", "LocalMachine")][string]$CertificateStore = "CurrentUser",
     [string]$TimestampUrl = "http://timestamp.digicert.com"
